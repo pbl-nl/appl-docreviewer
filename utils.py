@@ -4,14 +4,10 @@ The utils module contains general functionality that can be used at various plac
 # imports
 from typing import Any, Dict, List, Tuple
 import os
-import sys
-import time
 import datetime as dt
 import numpy as np
 from loguru import logger
 from langdetect import detect, LangDetectException
-import psutil
-import keyboard
 # local imports
 import settings
 
@@ -116,18 +112,17 @@ def create_vectordb_path(content_folder_path: str,
     embeddings_provider = settings.EMBEDDINGS_PROVIDER if embeddings_provider is None else embeddings_provider
     embeddings_model = settings.EMBEDDINGS_MODEL if embeddings_model is None else embeddings_model
     text_splitter_method = settings.TEXT_SPLITTER_METHOD if text_splitter_method is None else text_splitter_method
-    chunk_size = str(settings.CHUNK_SIZE) if chunk_size is None else str(chunk_size)
-    chunk_overlap = str(settings.CHUNK_OVERLAP) if chunk_overlap is None else str(chunk_overlap)
+    chunk_size = settings.CHUNK_SIZE if chunk_size is None else chunk_size
+    chunk_overlap = settings.CHUNK_OVERLAP if chunk_overlap is None else chunk_overlap
     text_splitter_method_child = settings.TEXT_SPLITTER_METHOD_CHILD if text_splitter_method_child is None else \
         text_splitter_method_child
-    chunk_size_child = str(settings.CHUNK_SIZE_CHILD) if chunk_size_child is None else str(chunk_size_child)
-    chunk_overlap_child = str(settings.CHUNK_OVERLAP_CHILD) \
-        if chunk_overlap_child is None else str(chunk_overlap_child)
+    chunk_size_child = settings.CHUNK_SIZE_CHILD if chunk_size_child is None else chunk_size_child
+    chunk_overlap_child = settings.CHUNK_OVERLAP_CHILD if chunk_overlap_child is None else chunk_overlap_child
     # vectordb_name is created from retriever_type, embeddings_provider, embeddings_model, and
     # parent and child text_splitter_method, chunk_size and chunk_overlap
     vectordb_name = retriever_type + "_" + embeddings_provider + "_" + embeddings_model + "_" + \
-        text_splitter_method + "_" + chunk_size + "_" + chunk_overlap + "_" + text_splitter_method_child + "_" +\
-        chunk_size_child + "_" + chunk_overlap_child
+        text_splitter_method + "_" + str(chunk_size) + "_" + str(chunk_overlap) + "_" + text_splitter_method_child + "_" +\
+        str(chunk_size_child) + "_" + str(chunk_overlap_child)
 
     vectordb_folder_path = os.path.join(content_folder_path, "vector_stores", vectordb_name)
 
@@ -193,32 +188,6 @@ def get_relevant_files_in_folder(content_folder_path: str,
             relevant_files.append(file)
 
     return relevant_files
-
-
-def exit_program() -> None:
-    """
-    Exits the Python process
-    """
-    logger.info("Exiting the program...")
-    sys.exit(0)
-
-
-def exit_ui() -> None:
-    """
-    Exits the User Interface process.
-    First, the last tab in the browser is closed
-    Then the python process is stopped
-    From: https://discuss.streamlit.io/t/close-streamlit-app-with-button-click/35132
-    """
-    # Give a bit of delay for user experience
-    time.sleep(1)
-    # Close streamlit browser tab
-    keyboard.press_and_release('ctrl+w')
-    logger.info("Closing the application")
-    # Terminate streamlit python process
-    pid = os.getpid()
-    p = psutil.Process(pid)
-    p.terminate()
 
 
 def getattr_or_default(obj: Any,

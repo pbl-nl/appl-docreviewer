@@ -11,8 +11,7 @@ from typing import Dict, List, Tuple
 import os
 import re
 from loguru import logger
-from langchain_community.document_loaders import BSHTMLLoader
-from langchain_community.document_loaders import TextLoader
+from langchain_community.document_loaders import BSHTMLLoader, TextLoader
 import fitz
 from docx2pdf import convert
 # local imports
