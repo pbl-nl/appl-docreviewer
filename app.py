@@ -70,11 +70,31 @@ ANALYSIS_DEFAULT_HEADERS = ["col_1", "col_2", "col_3"]
 
 ROW_NUMBER_COLUMN = "id"
 TABLE_COLUMNS = [ROW_NUMBER_COLUMN, *REVIEW_COLUMNS]
-REVIEW_COLUMN_WIDTHS: List[str | int] = ["6%", "24%", "12%", "38%", "20%"]
+REVIEW_COLUMN_WIDTHS: List[str | int] = ["3%", "24%", "8%", "42%", "23%"]
 
 TASK_OPTIONS = ("answer", "classify", "synthesis")
 CLASSES_VALUE_SEPARATOR = "\n"
+KEEPALIVE_INTERVAL_MS = 45_000
 
+KEEPALIVE_HEAD = f"""
+<script>
+(() => {{
+    const intervalMs = {KEEPALIVE_INTERVAL_MS};
+    const keepAlive = () => {{
+        fetch(window.location.pathname, {{ method: "HEAD", cache: "no-store" }}).catch(() => {{}});
+    }};
+
+    setInterval(keepAlive, intervalMs);
+    document.addEventListener("visibilitychange", () => {{
+        if (document.visibilityState === "visible") {{
+            keepAlive();
+        }}
+    }});
+}})();
+</script>
+"""
+
+# For styling purposes of the DataFrame components
 TABLE_CSS = """
 #questions-table table {
     table-layout: fixed;
@@ -99,9 +119,9 @@ TABLE_CSS = """
 
 #go-btn,
 #go-btn button {
-    width: 50px !important;
-    min-width: 50px !important;
-    max-width: 50px !important;
+    width: 420px !important;
+    min-width: 420px !important;
+    max-width: 420px !important;
     background-color: #0b5d1e !important;
     border-color: #0b5d1e !important;
     color: #ffffff !important;
@@ -123,11 +143,19 @@ TABLE_CSS = """
 #questions-table td,
 #analysis-output-table th,
 #analysis-output-table td {
-    white-space: normal !important;
+    white-space: pre-wrap !important;
     overflow-wrap: anywhere;
     word-break: break-word;
     vertical-align: top !important;
     font-size: 0.8rem !important;
+}
+
+/* Preserve embedded newlines across all DataFrame cells and editors. */
+.gradio-container [data-testid="dataframe"] td,
+.gradio-container [data-testid="dataframe"] td *,
+.gradio-container [data-testid="dataframe"] td textarea,
+.gradio-container [data-testid="dataframe"] td input {
+    white-space: pre-wrap !important;
 }
 
 #questions-table td {
@@ -720,7 +748,7 @@ def _classes_input_update(task: str, classes: Any = None) -> Any:
     return gr.update(visible=False, value="")
 
 
-def _screen_mode_update(mode: str) -> Tuple[Any, Any, Any, Any, Any, Any, Any]:
+def _screen_mode_update(mode: str, ingest_folder_path: str) -> Tuple[Any, Any, Any, Any, Any, Any]:
     """
     Toggle ingest and analysis UI sections based on selected screen mode.
 
@@ -728,24 +756,68 @@ def _screen_mode_update(mode: str) -> Tuple[Any, Any, Any, Any, Any, Any, Any]:
     ----------
     mode : str
         selected mode value from the sidebar.
+    ingest_folder_path : str
+        current ingest folder path from the ingest sidebar input.
 
     Returns
     -------
-    Tuple[Any, Any, Any, Any, Any, Any, Any]
+    Tuple[Any, Any, Any, Any, Any, Any]
         Gradio updates for ingest sidebar, input form accordion, analyse sidebar,
-        analyse main group, question list overview accordion, query markdown, and GO button.
+        analyse main group, question list overview accordion, and GO button.
     """
     is_ingest_mode = (mode or "").strip().lower() == "ingest folder"
     ingest_visibility_update = gr.update(visible=is_ingest_mode)
     analyse_visibility_update = gr.update(visible=not is_ingest_mode)
+
+    if is_ingest_mode:
+        (
+            question_overview_update,
+            input_form_update,
+            go_button_update,
+        ) = _ingest_main_visibility_update(ingest_folder_path)
+    else:
+        hidden_main_ingest_update = gr.update(visible=False)
+        question_overview_update = hidden_main_ingest_update
+        input_form_update = hidden_main_ingest_update
+        go_button_update = hidden_main_ingest_update
+
     return (
         ingest_visibility_update,
-        ingest_visibility_update,
+        input_form_update,
         analyse_visibility_update,
         analyse_visibility_update,
-        ingest_visibility_update,
-        ingest_visibility_update,
-        ingest_visibility_update,
+        question_overview_update,
+        go_button_update,
+    )
+
+
+def _ingest_main_visibility_update(folder_path: str) -> Tuple[Any, Any, Any]:
+    """
+    Show ingest main-screen components only when a valid document folder is submitted.
+
+    Parameters
+    ----------
+    folder_path : str
+        submitted folder path from ingest sidebar.
+
+    Returns
+    -------
+    Tuple[Any, Any, Any]
+        Gradio updates for question overview accordion, input form accordion,
+        and GO button visibility.
+    """
+    is_valid_folder = False
+    if folder_path:
+        try:
+            is_valid_folder = Path(folder_path).expanduser().resolve().is_dir()
+        except OSError:
+            is_valid_folder = False
+
+    visibility_update = gr.update(visible=is_valid_folder)
+    return (
+        visibility_update,
+        visibility_update,
+        visibility_update,
     )
 
 
@@ -785,6 +857,28 @@ def load_review_output_folders(folder_path: str) -> Any:
         return gr.update(visible=True, choices=[], value=None)
 
     return gr.update(visible=True, choices=output_folders, value=output_folders[0])
+
+
+def refresh_review_output_folders_for_mode(mode: str, folder_path: str) -> Any:
+    """
+    Refresh output-folder dropdown only while analyse mode is active.
+
+    Parameters
+    ----------
+    mode : str
+        selected mode value from the sidebar.
+    folder_path : str
+        document folder path used to locate the review output directory.
+
+    Returns
+    -------
+    Any
+        Gradio update object for output-folder dropdown visibility, choices, and value.
+    """
+    is_analyse_mode = (mode or "").strip().lower() == "analyse output"
+    if not is_analyse_mode:
+        return gr.update(visible=False, choices=[], value=None)
+    return load_review_output_folders(folder_path)
 
 
 def _analysis_result_type_update(selected_output_folder: Optional[str]) -> Any:
@@ -855,6 +949,9 @@ def _json_payload_to_table(payload: Any) -> Tuple[List[str], List[List[Any]]]:
             value = record.get(header, "")
             if isinstance(value, (dict, list)):
                 row.append(json.dumps(value, ensure_ascii=False))
+            elif isinstance(value, str):
+                normalized_value = value.replace("\r\n", "\n").replace("\\r\\n", "\n").replace("\\n", "\n")
+                row.append(normalized_value)
             else:
                 row.append(value)
         rows.append(row)
@@ -1321,6 +1418,23 @@ def refresh_ingest_file_filter(folder_path: str) -> Any:
     return gr.update(choices=file_names, value=[])
 
 
+def sync_folder_path(folder_path: str) -> Any:
+    """
+    Mirror a submitted folder path into the counterpart textbox.
+
+    Parameters
+    ----------
+    folder_path : str
+        submitted folder path.
+
+    Returns
+    -------
+    Any
+        Gradio update that sets the textbox value.
+    """
+    return gr.update(value=folder_path or "")
+
+
 def ingest_or_load_documents(
     content_folder_name: str, content_folder_path: str, vecdb_folder_path: str
 ) -> None:
@@ -1681,6 +1795,9 @@ def create_answers_for_folder(question_list_path: str,
                 json.dump(summary_records, summary_file, indent=2, ensure_ascii=False)
 
     # Then save to JSON
+    for row in answer_rows:
+        row["classes"] = _classes_text_from_storage(row.get("classes"))
+
     sorted_answer_rows = sorted(
         answer_rows,
         key=lambda row: (
@@ -1774,11 +1891,27 @@ def handle_ingestion(folder_path: str, ingest_file_filter: List[str]) -> Iterato
 
         # path of file with review questions
         question_list_path = os.path.join(folder_path, "review", "questions.json")
+        question_list_path_obj = Path(question_list_path)
+        if not question_list_path_obj.is_file():
+            yield _emit_status(
+                "Run failed: no review/questions.json found. Save the question list first.",
+                str(documents_root),
+            )
+            return
 
-        # copy the question list file to the output folder
+        try:
+            latest_mtime = datetime.fromtimestamp(question_list_path_obj.stat().st_mtime)
+            yield _emit_status(
+                f"Using latest questions.json (last saved {latest_mtime.isoformat(timespec='seconds')}).",
+                str(documents_root),
+            )
+        except OSError:
+            yield _emit_status("Using latest questions.json.", str(documents_root))
+
+        # copy the question list file to the output folder and run from this snapshot
         destination_path = os.path.join(folder_path, f"review/{timestamp}", "questions.json")
         shutil.copy(question_list_path, destination_path)
-        yield _emit_status("Copied questions.json snapshot.", str(documents_root))
+        yield _emit_status("Copied questions.json snapshot for this run.", str(documents_root))
 
         # ingest documents if documents in source folder path are not ingested yet
         yield _emit_status("Checking or building vector store (may take a while)...", str(documents_root))
@@ -1813,7 +1946,7 @@ def handle_ingestion(folder_path: str, ingest_file_filter: List[str]) -> Iterato
         yield _emit_status("Starting question processing...", str(documents_root))
 
         for progress_message in create_answers_for_folder(
-            question_list_path=question_list_path,
+            question_list_path=destination_path,
             review_files=paths,
             content_folder_name=content_folder_name,
             querier=querier,
@@ -1832,7 +1965,7 @@ def handle_ingestion(folder_path: str, ingest_file_filter: List[str]) -> Iterato
 
 
 ################# User Interface #################
-with gr.Blocks(analytics_enabled=False) as demo:
+with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
     active_folder = gr.State("")
 
     with gr.Sidebar():
@@ -1880,11 +2013,11 @@ with gr.Blocks(analytics_enabled=False) as demo:
             )
             analyse_status_messages = gr.Textbox(label="Status", interactive=False, lines=3)
 
-    with gr.Accordion("Overview of Current Question list", open=False) as question_overview_accordion:
+    with gr.Accordion("Overview of Current Question list", open=False, visible=False) as question_overview_accordion:
         questions_table = gr.Dataframe(
             headers=TABLE_COLUMNS,
             column_widths=REVIEW_COLUMN_WIDTHS,
-            datatype=["str", "str", "str", "str", "str"],
+            datatype="markdown",
             value=[],
             row_count=1,
             label="Overview of Review Questions (output)",
@@ -1894,7 +2027,7 @@ with gr.Blocks(analytics_enabled=False) as demo:
             static_columns=[0],
         )
 
-    with gr.Accordion("Input form for review questions", open=False) as main_screen_accordion:
+    with gr.Accordion("Input form for review questions", open=False, visible=False) as main_screen_accordion:
         with gr.Group() as main_screen_group:
             with gr.Row():
                 row_selector = gr.Dropdown(
@@ -1930,14 +2063,13 @@ with gr.Blocks(analytics_enabled=False) as demo:
             with gr.Row():
                 save_questions_btn: Any = gr.Button(value="Save Question list", variant="primary")
 
-    query_files_markdown = gr.Markdown("## Query selected files with current question list")
-    go_btn: Any = gr.Button(value="GO", variant="primary", elem_id="go-btn")
+    go_btn: Any = gr.Button(value="Query selected files with current question list", variant="primary", elem_id="go-btn", visible=False)
 
     with gr.Group(visible=False) as analyse_main_group:
         gr.Markdown("## Output Analysis")
         analyse_output_table = gr.Dataframe(
             headers=ANALYSIS_DEFAULT_HEADERS,
-            datatype="str",
+            datatype="markdown",
             value=[],
             label="Selected output",
             elem_id="analysis-output-table",
@@ -1954,9 +2086,25 @@ with gr.Blocks(analytics_enabled=False) as demo:
     )
 
     folder_path_input.submit(
+        fn=sync_folder_path,
+        inputs=[folder_path_input],
+        outputs=[analyse_folder_path_input],
+    )
+
+    folder_path_input.submit(
         fn=load_questions_table,
         inputs=[folder_path_input],
         outputs=[questions_table],
+    )
+
+    folder_path_input.submit(
+        fn=_ingest_main_visibility_update,
+        inputs=[folder_path_input],
+        outputs=[
+            question_overview_accordion,
+            main_screen_accordion,
+            go_btn,
+        ],
     )
 
     load_row_editor_event = folder_path_input.submit(
@@ -2069,30 +2217,55 @@ with gr.Blocks(analytics_enabled=False) as demo:
         outputs=[classes_input],
     )
 
-    go_btn.click(
+    go_btn_run_event = go_btn.click(
         fn=handle_ingestion,
         inputs=[folder_path_input, ingest_file_filter],
         outputs=[status_messages, active_folder],
     )
+    go_btn_run_event.then(
+        fn=load_review_output_folders,
+        inputs=[folder_path_input],
+        outputs=[analyse_output_folder_dropdown],
+    )
 
-    screen_mode.change(
+    screen_mode_change_event = screen_mode.change(
         fn=_screen_mode_update,
-        inputs=[screen_mode],
+        inputs=[screen_mode, folder_path_input],
         outputs=[
             ingest_sidebar_group,
             main_screen_accordion,
             analyse_sidebar_group,
             analyse_main_group,
             question_overview_accordion,
-            query_files_markdown,
             go_btn,
         ],
+    )
+    screen_mode_change_event.then(
+        fn=refresh_review_output_folders_for_mode,
+        inputs=[screen_mode, analyse_folder_path_input],
+        outputs=[analyse_output_folder_dropdown],
+    )
+    screen_mode_change_event.then(
+        fn=_analysis_result_type_update,
+        inputs=[analyse_output_folder_dropdown],
+        outputs=[analyse_result_type_radio],
+    )
+    screen_mode_change_event.then(
+        fn=load_selected_output_table,
+        inputs=[analyse_folder_path_input, analyse_output_folder_dropdown, analyse_result_type_radio],
+        outputs=[analyse_output_table, analyse_status_messages],
     )
 
     analyse_folder_submit_event = analyse_folder_path_input.submit(
         fn=load_review_output_folders,
         inputs=[analyse_folder_path_input],
         outputs=[analyse_output_folder_dropdown],
+    )
+
+    analyse_folder_path_input.submit(
+        fn=sync_folder_path,
+        inputs=[analyse_folder_path_input],
+        outputs=[folder_path_input],
     )
 
     analyse_folder_submit_event.then(
@@ -2127,6 +2300,6 @@ with gr.Blocks(analytics_enabled=False) as demo:
 
 
 if __name__ == "__main__":
-    # demo.queue()
+    demo.queue(default_concurrency_limit=1)
     enable_pwa = os.getenv("APP_ENABLE_PWA", "0").strip().lower() in {"1", "true", "yes", "on"}
     demo.launch(inbrowser=True, pwa=enable_pwa, css=TABLE_CSS)
