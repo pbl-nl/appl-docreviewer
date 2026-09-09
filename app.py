@@ -748,7 +748,7 @@ def _classes_input_update(task: str, classes: Any = None) -> Any:
     return gr.update(visible=False, value="")
 
 
-def _screen_mode_update(mode: str, ingest_folder_path: str) -> Tuple[Any, Any, Any, Any, Any, Any]:
+def _screen_mode_update(mode: str, ingest_folder_path: str) -> Tuple[Any, Any, Any, Any, Any, Any, Any]:
     """
     Toggle ingest and analysis UI sections based on selected screen mode.
 
@@ -761,9 +761,10 @@ def _screen_mode_update(mode: str, ingest_folder_path: str) -> Tuple[Any, Any, A
 
     Returns
     -------
-    Tuple[Any, Any, Any, Any, Any, Any]
+    Tuple[Any, Any, Any, Any, Any, Any, Any]
         Gradio updates for ingest sidebar, input form accordion, analyse sidebar,
-        analyse main group, question list overview accordion, and GO button.
+        analyse main group, question list overview accordion, GO button,
+        and ingest status textbox.
     """
     is_ingest_mode = (mode or "").strip().lower() == "ingest folder"
     ingest_visibility_update = gr.update(visible=is_ingest_mode)
@@ -774,12 +775,14 @@ def _screen_mode_update(mode: str, ingest_folder_path: str) -> Tuple[Any, Any, A
             question_overview_update,
             input_form_update,
             go_button_update,
+            status_update,
         ) = _ingest_main_visibility_update(ingest_folder_path)
     else:
         hidden_main_ingest_update = gr.update(visible=False)
         question_overview_update = hidden_main_ingest_update
         input_form_update = hidden_main_ingest_update
         go_button_update = hidden_main_ingest_update
+        status_update = hidden_main_ingest_update
 
     return (
         ingest_visibility_update,
@@ -788,10 +791,11 @@ def _screen_mode_update(mode: str, ingest_folder_path: str) -> Tuple[Any, Any, A
         analyse_visibility_update,
         question_overview_update,
         go_button_update,
+        status_update,
     )
 
 
-def _ingest_main_visibility_update(folder_path: str) -> Tuple[Any, Any, Any]:
+def _ingest_main_visibility_update(folder_path: str) -> Tuple[Any, Any, Any, Any]:
     """
     Show ingest main-screen components only when a valid document folder is submitted.
 
@@ -802,9 +806,9 @@ def _ingest_main_visibility_update(folder_path: str) -> Tuple[Any, Any, Any]:
 
     Returns
     -------
-    Tuple[Any, Any, Any]
+    Tuple[Any, Any, Any, Any]
         Gradio updates for question overview accordion, input form accordion,
-        and GO button visibility.
+        GO button visibility, and ingest status textbox visibility.
     """
     is_valid_folder = False
     if folder_path:
@@ -815,6 +819,7 @@ def _ingest_main_visibility_update(folder_path: str) -> Tuple[Any, Any, Any]:
 
     visibility_update = gr.update(visible=is_valid_folder)
     return (
+        visibility_update,
         visibility_update,
         visibility_update,
         visibility_update,
@@ -1989,7 +1994,6 @@ with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
                 info="Select one or more files. Leave empty to process all supported files.",
                 elem_id="ingest-file-filter",
             )
-            status_messages = gr.Textbox(label="Status", interactive=False, lines=8)
 
         with gr.Group(visible=False) as analyse_sidebar_group:
             analyse_folder_path_input = gr.Textbox(
@@ -2064,6 +2068,7 @@ with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
                 save_questions_btn: Any = gr.Button(value="Save Question list", variant="primary")
 
     go_btn: Any = gr.Button(value="Query selected files with current question list", variant="primary", elem_id="go-btn", visible=False)
+    status_messages = gr.Textbox(label="Status", interactive=False, lines=8, visible=False)
 
     with gr.Group(visible=False) as analyse_main_group:
         gr.Markdown("## Output Analysis")
@@ -2104,6 +2109,7 @@ with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
             question_overview_accordion,
             main_screen_accordion,
             go_btn,
+            status_messages,
         ],
     )
 
@@ -2238,6 +2244,7 @@ with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
             analyse_main_group,
             question_overview_accordion,
             go_btn,
+            status_messages,
         ],
     )
     screen_mode_change_event.then(
