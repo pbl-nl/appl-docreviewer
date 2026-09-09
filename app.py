@@ -1785,7 +1785,7 @@ def create_answers_for_folder(question_list_path: str,
                 }
             )
 
-            yield f"Synthesized cross-document answer for question: {question}"
+            yield f"Synthesized cross-document answers for question: {question}"
 
         if summary_records:
             output_path_str = str(output_path)

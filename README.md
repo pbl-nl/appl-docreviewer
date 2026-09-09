@@ -58,27 +58,40 @@ At a high level, the pipeline is:
 
 ## Prerequisites
 
-- Python 3.13 (recommended in this repository)
+- Miniconda or Anaconda installed (`conda` available in terminal)
 - Windows PowerShell (commands below use PowerShell examples)
 - Access to the model provider you configure in `settings.py`
 
 Notes:
+
+- The provided conda environment specification in `appl-docreviewer.yml` includes Python 3.13 and project dependencies.
 
 - `.docx` parsing uses conversion to PDF via `docx2pdf` and may require a local Microsoft Word installation.
 - The repository includes many dependencies; installation can take several minutes.
 
 ## Installation
 
-1. Create and activate a virtual environment.
-2. Install dependencies.
-3. Configure settings and environment variables.
+1. Create the conda environment from `appl-docreviewer.yml`.
+2. Activate the environment.
+3. (Optional) update the environment when dependencies change.
+4. Configure settings and environment variables.
 
 PowerShell example:
 
 ```powershell
-python -m venv venv313
-.\venv313\Scripts\Activate.ps1
-pip install -r requirements.txt
+conda env create -n appl-docreviewer -f appl-docreviewer.yml
+conda activate appl-docreviewer
+
+# Optional: update an existing environment to match the YAML file
+conda env update -n appl-docreviewer -f appl-docreviewer.yml --prune
+```
+
+If your environment already exists and you want a clean rebuild:
+
+```powershell
+conda remove -n appl-docreviewer --all
+conda env create -n appl-docreviewer -f appl-docreviewer.yml
+conda activate appl-docreviewer
 ```
 
 ## Configuration
