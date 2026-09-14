@@ -369,3 +369,4 @@ dependencies:
       - typer==0.26.8
       - websockets==16.1.1
       - xlsxwriter==3.2.9
+prefix: F:\User\troosts\conda\envs\appl-docreviewer
