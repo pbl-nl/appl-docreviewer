@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import html
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -16,11 +17,44 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+try:
+    import pandas as pd
+except Exception:
+    pd = None
+
 DEFAULT_SYNTHESIS_TEMPLATE = (
     "Synthesize the following document-specific answers into one consolidated answer. "
     "Focus on agreements, key differences, and confidence-limiting gaps.\n\n"
     "Question:\n{question}\n\n"
     "Document answers:\n{answer_string}"
+)
+
+DEFAULT_ANSWER_TEMPLATE = (
+    "Answer the question\n\n"
+    "{question}\n\n"
+    "with the restriction that the answer can only be extracted from the following context:\n"
+    "{context}."
+)
+
+DEFAULT_CLASSIFY_TEMPLATE = (
+    "You are an AI assistant for a document analysis system.\n"
+    "Analyze the retrieved context and return a response based on the question below.\n\n"
+    "Question: {question}\n\n"
+    "Retrieved context: {context}\n\n"
+    "Optional:\n"
+    "List any definitions here when necessary\n\n"
+    "Your task:\n"
+    "Assign the context to one or more of the following classes:\n"
+    "class 1: explain when the answer to the question must be assigned to class 1\n"
+    "class 2: explain when the answer to the question must be assigned to class 2,\n"
+    "etc.\n\n"
+    "When output in a specific format is required, use the text below\n"
+    "Return output in the following format:\n\n"
+    "document: class(es) | explanation\n\n"
+    "The explanation is the explanation, based on the context, of why these class(es) have been chosen and why the other class(es) have not been chosen.\n"
+    "If you don't know the answer because the context doesn't contain the information, then the class would be 1\n\n"
+    "Examples:\n"
+    "Here any real world examples can be given. This part can also be left out."
 )
 
 
@@ -110,6 +144,28 @@ TABLE_CSS = """
     background-color: #0b5d1e !important;
     border-color: #0b5d1e !important;
     color: #ffffff !important;
+}
+
+#previous-row-btn {
+    background-color: #8a6d00 !important;
+    border-color: #8a6d00 !important;
+    color: #ffffff !important;
+}
+
+#previous-row-btn:hover {
+    background-color: #705900 !important;
+    border-color: #705900 !important;
+}
+
+#next-row-btn {
+    background-color: #f1d77a !important;
+    border-color: #d8bb58 !important;
+    color: #3b2f00 !important;
+}
+
+#next-row-btn:hover {
+    background-color: #e6cc6f !important;
+    border-color: #cdb351 !important;
 }
 
 #add-row-btn:hover {
@@ -356,6 +412,8 @@ def _normalize_task(value: Any) -> str:
         return normalized
     if normalized in {"classification", "class"}:
         return "classify"
+    if normalized in {"synthesize", "summarize", "summary"}:
+        return "synthesis"
     return "answer"
 
 
@@ -520,7 +578,7 @@ def _with_row_numbers(rows: List[List[Union[str, bool]]]) -> List[List[Union[str
     return numbered_rows
 
 
-def _questions_table_update(value: Any) -> Any:
+def _questions_table_update(value: Any, selected_row: Optional[str] = None) -> Any:
     """
     Build a Gradio update payload for the question overview table.
 
@@ -528,6 +586,8 @@ def _questions_table_update(value: Any) -> Any:
     ----------
     value : Any
         table rows to display.
+    selected_row : Optional[str]
+        1-based row index to highlight in the table.
 
     Returns
     -------
@@ -536,6 +596,21 @@ def _questions_table_update(value: Any) -> Any:
     """
     # Render the table as output-only; editing happens via the custom form.
     row_count = max(len(value), 1) if isinstance(value, list) else None
+
+    if pd is not None and isinstance(value, list) and value:
+        # Style only the presentation layer; keep underlying values unchanged for callbacks.
+        dataframe = pd.DataFrame(value, columns=TABLE_COLUMNS)
+        rows = _normalize_questions_rows_with_options(value, drop_empty=False)
+        selected_index = _selected_row_index(selected_row, rows)
+
+        def _highlight_selected_row(row: Any) -> list[str]:
+            if selected_index is not None and row.name == selected_index:
+                return ["background-color: #dff3e3"] * len(row)
+            return [""] * len(row)
+
+        styled = dataframe.style.apply(_highlight_selected_row, axis=1)
+        return gr.update(value=styled, row_count=row_count, interactive=False)
+
     return gr.update(value=value, row_count=row_count, interactive=False)
 
 
@@ -579,9 +654,27 @@ def _normalize_questions_rows_with_options(
     if table_data is None:
         return []
 
+    # Gradio update payloads can be received in callbacks as dicts; extract row values.
+    if isinstance(table_data, dict):
+        for key in ("value", "data", "rows", "questions"):
+            candidate_rows = table_data.get(key)
+            if isinstance(candidate_rows, list):
+                table_data = candidate_rows
+                break
+
+    # When table output is styled, Gradio/pandas may pass a Styler object.
+    styler_data = getattr(table_data, "data", None)
+    if styler_data is not None and hasattr(styler_data, "values"):
+        table_data = styler_data
+
     raw_rows: list[Any]
-    if hasattr(table_data, "values") and hasattr(table_data.values, "tolist"):
-        raw_rows = table_data.values.tolist()
+    values_attr = getattr(table_data, "values", None)
+    tolist = getattr(values_attr, "tolist", None)
+    if callable(tolist):
+        rows_candidate = tolist()
+        if not isinstance(rows_candidate, list):
+            return []
+        raw_rows = rows_candidate
     elif isinstance(table_data, list):
         raw_rows = table_data
     else:
@@ -643,9 +736,9 @@ def _default_form_values() -> Tuple[str, str, str, str]:
     return "", "answer", "", ""
 
 
-def _row_selector_update(rows: List[List[Union[str, bool]]], selected_index: Optional[int] = None) -> Any:
+def _selected_row_value(rows: List[List[Union[str, bool]]], selected_index: Optional[int] = None) -> Optional[str]:
     """
-    Build a Gradio update for the row selector dropdown.
+    Return a selected row value encoded as a 1-based string.
 
     Parameters
     ----------
@@ -656,21 +749,16 @@ def _row_selector_update(rows: List[List[Union[str, bool]]], selected_index: Opt
 
     Returns
     -------
-    Any
-        Gradio update object for selector choices and value.
+    Optional[str]
+        selected 1-based row number, or None when no rows exist.
     """
     if not rows:
-        return gr.update(choices=[], value=None)
-
-    choices: List[str] = []
-    for index, _ in enumerate(rows):
-        choices.append(str(index + 1))
+        return None
 
     if selected_index is None or selected_index < 0 or selected_index >= len(rows):
         selected_index = 0
 
-    # Dropdown values are 1-based row numbers for a clearer UX.
-    return gr.update(choices=choices, value=str(selected_index + 1))
+    return str(selected_index + 1)
 
 
 def _selected_row_index(selected_row: Optional[str], rows: List[List[Union[str, bool]]]) -> Optional[int]:
@@ -748,6 +836,66 @@ def _classes_input_update(task: str, classes: Any = None) -> Any:
     return gr.update(visible=False, value="")
 
 
+def _default_instruction_for_task(task: str) -> str:
+    """
+    Return a default instruction template for a task.
+
+    Parameters
+    ----------
+    task : str
+        selected task value.
+
+    Returns
+    -------
+    str
+        default instruction text for the task, or empty string when none applies.
+    """
+    normalized_task = _normalize_task(task)
+    if normalized_task == "answer":
+        return DEFAULT_ANSWER_TEMPLATE
+    if normalized_task == "classify":
+        return DEFAULT_CLASSIFY_TEMPLATE
+    if normalized_task == "synthesis":
+        return DEFAULT_SYNTHESIS_TEMPLATE
+    return ""
+
+
+def _instruction_input_update(task: str, instruction: str, selected_row: Optional[str] = None) -> Any:
+    """
+    Auto-fill instruction textbox with a task default when currently empty.
+
+    Parameters
+    ----------
+    task : str
+        selected task value.
+    instruction : str
+        current instruction textbox value.
+    selected_row : Optional[str]
+        currently selected row number; when present, the editor is updating an existing row.
+
+    Returns
+    -------
+    Any
+        Gradio update object for the instruction textbox value.
+    """
+    current_instruction = str(instruction or "")
+
+    # When editing an existing row, a task change should switch to that task's default template.
+    if selected_row is not None:
+        default_instruction = _default_instruction_for_task(task)
+        if default_instruction:
+            return gr.update(value=default_instruction)
+        return gr.update(value=current_instruction)
+
+    if current_instruction.strip():
+        return gr.update(value=current_instruction)
+
+    default_instruction = _default_instruction_for_task(task)
+    if default_instruction:
+        return gr.update(value=default_instruction)
+    return gr.update(value=current_instruction)
+
+
 def _screen_mode_update(mode: str, ingest_folder_path: str) -> Tuple[Any, Any, Any, Any, Any, Any, Any]:
     """
     Toggle ingest and analysis UI sections based on selected screen mode.
@@ -766,7 +914,7 @@ def _screen_mode_update(mode: str, ingest_folder_path: str) -> Tuple[Any, Any, A
         analyse main group, question list overview accordion, GO button,
         and ingest status textbox.
     """
-    is_ingest_mode = (mode or "").strip().lower() == "ingest folder"
+    is_ingest_mode = (mode or "").strip().lower() == "query folder"
     ingest_visibility_update = gr.update(visible=is_ingest_mode)
     analyse_visibility_update = gr.update(visible=not is_ingest_mode)
 
@@ -818,11 +966,19 @@ def _ingest_main_visibility_update(folder_path: str) -> Tuple[Any, Any, Any, Any
             is_valid_folder = False
 
     visibility_update = gr.update(visible=is_valid_folder)
+    status_value = ""
+
+    if is_valid_folder:
+        questions_json_path = _questions_json_path(folder_path)
+        if not questions_json_path.is_file():
+            status_value = "Empty question list. Please provide one or more questions."
+
+    status_update = gr.update(visible=is_valid_folder, value=status_value)
     return (
         visibility_update,
         visibility_update,
         visibility_update,
-        visibility_update,
+        status_update,
     )
 
 
@@ -903,6 +1059,32 @@ def _analysis_result_type_update(selected_output_folder: Optional[str]) -> Any:
     if not selected_output_folder:
         return gr.update(visible=False, value=None)
     return gr.update(visible=True, value="answers")
+
+
+def _sidebar_status_for_mode(mode: str, folder_path: str, current_status: str) -> str:
+    """
+    Return sidebar status text based on selected mode and folder path.
+
+    Parameters
+    ----------
+    mode : str
+        selected mode value from the sidebar.
+    folder_path : str
+        current document folder path.
+    current_status : str
+        current status text shown in the sidebar.
+
+    Returns
+    -------
+    str
+        updated status message for the sidebar textbox.
+    """
+    normalized_mode = (mode or "").strip().lower()
+    if normalized_mode == "query folder" and not str(folder_path or "").strip():
+        return "Provide a document folder first."
+    if normalized_mode == "query folder":
+        return "Continue with the input form for review questions"
+    return str(current_status or "")
 
 
 def _json_payload_to_table(payload: Any) -> Tuple[List[str], List[List[Any]]]:
@@ -1027,39 +1209,13 @@ def load_selected_output_table(
     )
 
 
-def populate_form_from_selected_row(
-    table_data: Any,
-    selected_row: Optional[str],
-) -> Tuple[str, str, str, str]:
-    """
-    Populate row editor fields from the currently selected table row.
-
-    Parameters
-    ----------
-    table_data : Any
-        question table data.
-    selected_row : Optional[str]
-        selected row number.
-
-    Returns
-    -------
-    Tuple[str, str, str, str]
-        row editor values `(question, task, instruction, classes)`.
-    """
-    rows = _normalize_questions_rows_with_options(table_data, drop_empty=False)
-    index = _selected_row_index(selected_row, rows)
-    if index is None:
-        return _default_form_values()
-    return _form_values_from_row(rows[index])
-
-
 def add_question_row_from_form(
     table_data: Any,
     question: str,
     task: str,
     instruction: str,
     classes: Any,
-) -> Tuple[Any, Any, str, str, str, str, str]:
+) -> Tuple[Any, Optional[str], str, str, str, str, str]:
     """
     Append a new question row from row-editor form values.
 
@@ -1078,19 +1234,109 @@ def add_question_row_from_form(
 
     Returns
     -------
-    Tuple[Any, Any, str, str, str, str, str]
-        updated table payload, row selector update, normalized form values, and status message.
+    Tuple[Any, Optional[str], str, str, str, str, str]
+        updated table payload, selected row value, normalized form values, and status message.
     """
     rows = _normalize_questions_rows_with_options(table_data, drop_empty=False)
-    new_row = _normalize_review_row([question, task, instruction, classes])
+    resolved_instruction = str(instruction or "")
+    if not resolved_instruction.strip():
+        resolved_instruction = _default_instruction_for_task(task)
+
+    new_row = _normalize_review_row([question, task, resolved_instruction, classes])
     rows.append(new_row)
+    selected_row = _selected_row_value(rows, len(rows) - 1)
 
     return (
-        _questions_table_update(_with_row_numbers(rows)),
-        _row_selector_update(rows, len(rows) - 1),
+        _questions_table_update(_with_row_numbers(rows), selected_row=selected_row),
+        selected_row,
         *_form_values_from_row(new_row),
         f"Added row {len(rows)}.",
     )
+
+
+def _navigate_row_from_form(
+    table_data: Any,
+    selected_row: Optional[str],
+    *,
+    step: int,
+) -> Tuple[Any, Optional[str], str, str, str, str, str]:
+    """
+    Move the row selection relative to the current position.
+
+    Parameters
+    ----------
+    table_data : Any
+        existing question table data.
+    selected_row : Optional[str]
+        currently selected 1-based row number.
+    step : int
+        row movement delta (`-1` for previous, `+1` for next).
+
+    Returns
+    -------
+    Tuple[Any, Optional[str], str, str, str, str, str]
+        table update payload, selected row value, form values for that row, and status message.
+    """
+    rows = _normalize_questions_rows_with_options(table_data, drop_empty=False)
+    if not rows:
+        return _questions_table_update([]), None, *_default_form_values(), "No rows available."
+
+    index = _selected_row_index(selected_row, rows)
+    if index is None:
+        index = 0
+
+    next_index = max(0, min(len(rows) - 1, index + step))
+    next_selected_row = _selected_row_value(rows, next_index)
+    return (
+        _questions_table_update(_with_row_numbers(rows), selected_row=next_selected_row),
+        next_selected_row,
+        *_form_values_from_row(rows[next_index]),
+        f"Selected row {next_index + 1} of {len(rows)}.",
+    )
+
+
+def select_previous_row_from_form(
+    table_data: Any,
+    selected_row: Optional[str],
+) -> Tuple[Any, Optional[str], str, str, str, str, str]:
+    """
+    Select the previous row in the question list.
+
+    Parameters
+    ----------
+    table_data : Any
+        existing question table data.
+    selected_row : Optional[str]
+        currently selected 1-based row number.
+
+    Returns
+    -------
+    Tuple[Any, Optional[str], str, str, str, str, str]
+        table update payload, selected row value, form values for that row, and status message.
+    """
+    return _navigate_row_from_form(table_data, selected_row, step=-1)
+
+
+def select_next_row_from_form(
+    table_data: Any,
+    selected_row: Optional[str],
+) -> Tuple[Any, Optional[str], str, str, str, str, str]:
+    """
+    Select the next row in the question list.
+
+    Parameters
+    ----------
+    table_data : Any
+        existing question table data.
+    selected_row : Optional[str]
+        currently selected 1-based row number.
+
+    Returns
+    -------
+    Tuple[Any, Optional[str], str, str, str, str, str]
+        table update payload, selected row value, form values for that row, and status message.
+    """
+    return _navigate_row_from_form(table_data, selected_row, step=1)
 
 
 def update_question_row_from_form(
@@ -1100,7 +1346,7 @@ def update_question_row_from_form(
     task: str,
     instruction: str,
     classes: Any,
-) -> Tuple[Any, Any, str, str, str, str, str]:
+) -> Tuple[Any, Optional[str], str, str, str, str, str]:
     """
     Update an existing question row from row-editor form values.
 
@@ -1121,15 +1367,15 @@ def update_question_row_from_form(
 
     Returns
     -------
-    Tuple[Any, Any, str, str, str, str, str]
-        updated table payload, row selector update, normalized form values, and status message.
+    Tuple[Any, Optional[str], str, str, str, str, str]
+        updated table payload, selected row value, normalized form values, and status message.
     """
     rows = _normalize_questions_rows_with_options(table_data, drop_empty=False)
     index = _selected_row_index(selected_row, rows)
     if index is None:
         return (
-            _questions_table_update(_with_row_numbers(rows)),
-            _row_selector_update(rows),
+            _questions_table_update(_with_row_numbers(rows), selected_row=_selected_row_value(rows)),
+            _selected_row_value(rows),
             question,
             _normalize_task(task),
             instruction,
@@ -1139,10 +1385,11 @@ def update_question_row_from_form(
 
     updated_row = _normalize_review_row([question, task, instruction, classes])
     rows[index] = updated_row
+    selected_row_value = _selected_row_value(rows, index)
 
     return (
-        _questions_table_update(_with_row_numbers(rows)),
-        _row_selector_update(rows, index),
+        _questions_table_update(_with_row_numbers(rows), selected_row=selected_row_value),
+        selected_row_value,
         *_form_values_from_row(updated_row),
         f"Updated row {index + 1}.",
     )
@@ -1151,7 +1398,7 @@ def update_question_row_from_form(
 def delete_question_row_from_form(
     table_data: Any,
     selected_row: Optional[str],
-) -> Tuple[Any, Any, str, str, str, str, str]:
+) -> Tuple[Any, Optional[str], str, str, str, str, str]:
     """
     Delete the selected question row from table data.
 
@@ -1164,14 +1411,14 @@ def delete_question_row_from_form(
 
     Returns
     -------
-    Tuple[Any, Any, str, str, str, str, str]
-        updated table payload, row selector update, next form values, and status message.
+    Tuple[Any, Optional[str], str, str, str, str, str]
+        updated table payload, selected row value, next form values, and status message.
     """
     rows = _normalize_questions_rows_with_options(table_data, drop_empty=False)
     if not rows:
         return (
             _questions_table_update([]),
-            _row_selector_update([]),
+            None,
             *_default_form_values(),
             "No rows to delete.",
         )
@@ -1180,7 +1427,7 @@ def delete_question_row_from_form(
     if index is None:
         return (
             _questions_table_update(_with_row_numbers(rows)),
-            _row_selector_update(rows),
+            _selected_row_value(rows),
             *_default_form_values(),
             "Select a row before deleting.",
         )
@@ -1191,7 +1438,7 @@ def delete_question_row_from_form(
     if not rows:
         return (
             _questions_table_update([]),
-            _row_selector_update([]),
+            None,
             *_default_form_values(),
             f"Deleted row {deleted_row_number}.",
         )
@@ -1199,7 +1446,7 @@ def delete_question_row_from_form(
     next_index = min(index, len(rows) - 1)
     return (
         _questions_table_update(_with_row_numbers(rows)),
-        _row_selector_update(rows, next_index),
+        _selected_row_value(rows, next_index),
         *_form_values_from_row(rows[next_index]),
         f"Deleted row {deleted_row_number}.",
     )
@@ -1308,10 +1555,11 @@ def load_questions_table(folder_path: str) -> Any:
         Gradio update object for the overview questions table.
     """
     rows = _load_questions_rows(folder_path)
-    return _questions_table_update(_with_row_numbers(rows))
+    selected_row = _selected_row_value(rows, 0)
+    return _questions_table_update(_with_row_numbers(rows), selected_row=selected_row)
 
 
-def load_row_editor(folder_path: str) -> Tuple[Any, str, str, str, str]:
+def load_row_editor(folder_path: str) -> Tuple[Optional[str], str, str, str, str]:
     """
     Load row selector and initial editor values from saved questions.
 
@@ -1322,14 +1570,14 @@ def load_row_editor(folder_path: str) -> Tuple[Any, str, str, str, str]:
 
     Returns
     -------
-    Tuple[Any, str, str, str, str]
-        row selector update and initial row editor values.
+    Tuple[Optional[str], str, str, str, str]
+        selected row value and initial row editor values.
     """
     rows = _load_questions_rows(folder_path)
     if not rows:
-        return _row_selector_update([]), *_default_form_values()
+        return None, *_default_form_values()
 
-    return _row_selector_update(rows, 0), *_form_values_from_row(rows[0])
+    return _selected_row_value(rows, 0), *_form_values_from_row(rows[0])
 
 
 def save_and_reload_questions_table(
@@ -1340,7 +1588,7 @@ def save_and_reload_questions_table(
     instruction: str,
     classes: Any,
     folder_path: str,
-) -> Tuple[str, Any, Any, str, str, str, str]:
+) -> Tuple[str, Any, Optional[str], str, str, str, str]:
     """
     Save current editor changes, reload persisted questions, and refresh UI state.
 
@@ -1363,37 +1611,68 @@ def save_and_reload_questions_table(
 
     Returns
     -------
-    Tuple[str, Any, Any, str, str, str, str]
-        status message, refreshed table update, row selector update, and refreshed form values.
+    Tuple[str, Any, Optional[str], str, str, str, str]
+        status message, refreshed table update, selected row value, and refreshed form values.
     """
     rows = _normalize_questions_rows_with_options(table_data, drop_empty=False)
-    index = _selected_row_index(selected_row, rows)
-    if index is None:
-        return (
-            "Select a row before saving.",
-            _questions_table_update(_with_row_numbers(rows)),
-            _row_selector_update(rows),
-            question,
-            _normalize_task(task),
-            instruction,
-            _classes_text_from_storage(classes),
-        )
-
     updated_row = _normalize_review_row([question, task, instruction, classes])
-    rows[index] = updated_row
+    draft_has_content = any(str(cell).strip() for cell in [updated_row[0], updated_row[2], updated_row[3]])
+
+    index = _selected_row_index(selected_row, rows)
+    action_message = ""
+
+    if index is None:
+        existing_content_rows = [
+            row for row in rows if any(str(cell).strip() for cell in [row[0], row[2], row[3]])
+        ]
+        if existing_content_rows:
+            return (
+                "Select a row before saving.",
+                _questions_table_update(_with_row_numbers(rows), selected_row=_selected_row_value(rows)),
+                _selected_row_value(rows),
+                question,
+                _normalize_task(task),
+                instruction,
+                _classes_text_from_storage(classes),
+            )
+
+        if not draft_has_content:
+            return (
+                "Nothing to save: enter question content first.",
+                _questions_table_update(_with_row_numbers(rows), selected_row=_selected_row_value(rows)),
+                _selected_row_value(rows),
+                question,
+                _normalize_task(task),
+                instruction,
+                _classes_text_from_storage(classes),
+            )
+
+        rows = [updated_row]
+        index = 0
+        action_message = "Added row 1."
+    else:
+        existing_row = rows[index]
+        existing_row_has_content = any(str(cell).strip() for cell in [existing_row[0], existing_row[2], existing_row[3]])
+
+        # Guard against wiping a populated row when the editor form is unexpectedly blank.
+        if draft_has_content or not existing_row_has_content:
+            rows[index] = updated_row
+            action_message = f"Updated row {index + 1}."
+        else:
+            action_message = f"Preserved row {index + 1}; form fields were empty."
 
     save_status = save_questions_table(table_data=rows, folder_path=folder_path)
     rows = _load_questions_rows(folder_path=folder_path)
-    table_update = _questions_table_update(_with_row_numbers(rows))
+    table_update = _questions_table_update(_with_row_numbers(rows), selected_row=_selected_row_value(rows, index))
 
     if not rows:
-        return save_status, table_update, _row_selector_update([]), *_default_form_values()
+        return save_status, table_update, None, *_default_form_values()
 
     next_index = min(index, len(rows) - 1)
     return (
-        f"Updated row {index + 1}. {save_status}",
+        f"{action_message} {save_status}".strip(),
         table_update,
-        _row_selector_update(rows, next_index),
+        _selected_row_value(rows, next_index),
         *_form_values_from_row(rows[next_index]),
     )
 
@@ -1890,7 +2169,7 @@ def handle_ingestion(folder_path: str, ingest_file_filter: List[str]) -> Iterato
         yield _emit_status("Prepared vector store path.", str(documents_root))
 
         # create output folder with timestamp
-        timestamp = datetime.now().strftime("%Y_%m_%d_%Hhour_%Mmin_%Ssec")
+        timestamp = datetime.now().strftime("%Y%m%d_%Hh%Mm%Ss")
         os.mkdir(os.path.join(folder_path, f"review/{timestamp}"))
         yield _emit_status(f"Created output folder review/{timestamp}.", str(documents_root))
 
@@ -1970,17 +2249,12 @@ def handle_ingestion(folder_path: str, ingest_file_filter: List[str]) -> Iterato
 
 
 ################# User Interface #################
-with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
+with gr.Blocks(analytics_enabled=False) as demo:
     active_folder = gr.State("")
+    selected_row_state = gr.State(value=None)
 
     with gr.Sidebar():
         gr.Markdown("# ChatPBL DocReviewer")
-        screen_mode = gr.Radio(
-            label="Mode",
-            choices=["ingest folder", "analyse output"],
-            value="ingest folder",
-            interactive=True,
-        )
 
         with gr.Group() as ingest_sidebar_group:
             folder_path_input = gr.Textbox(label="Document folder", 
@@ -2015,33 +2289,19 @@ with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
                 visible=False,
                 interactive=True,
             )
-            analyse_status_messages = gr.Textbox(label="Status", interactive=False, lines=3)
 
-    with gr.Accordion("Overview of Current Question list", open=False, visible=False) as question_overview_accordion:
-        questions_table = gr.Dataframe(
-            headers=TABLE_COLUMNS,
-            column_widths=REVIEW_COLUMN_WIDTHS,
-            datatype="markdown",
-            value=[],
-            row_count=1,
-            label="Overview of Review Questions (output)",
-            elem_id="questions-table",
-            wrap=True,
-            interactive=False,
-            static_columns=[0],
+        screen_mode = gr.Radio(
+            label="Mode",
+            choices=["query folder", "analyse output"],
+            value="query folder",
+            interactive=True,
         )
+
+        analyse_status_messages = gr.Textbox(label="Status", interactive=False, lines=3)
 
     with gr.Accordion("Input form for review questions", open=False, visible=False) as main_screen_accordion:
         with gr.Group() as main_screen_group:
             with gr.Row():
-                row_selector = gr.Dropdown(
-                    label="id",
-                    choices=[],
-                    value=None,
-                    interactive=True,
-                    scale=1,
-                )
-                question_input = gr.Textbox(label="question", lines=3, scale=7)
                 task_input = gr.Radio(
                     label="task",
                     choices=list(TASK_OPTIONS),
@@ -2049,6 +2309,7 @@ with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
                     interactive=True,
                     scale=2,
                 )
+                question_input = gr.Textbox(label="question", lines=3, scale=8)
                 classes_input = gr.Textbox(
                     label="classes",
                     interactive=True,
@@ -2061,11 +2322,27 @@ with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
             instruction_input = gr.Textbox(label="instruction", lines=6)
 
             with gr.Row():
+                previous_row_btn: Any = gr.Button(value="Previous row", elem_id="previous-row-btn")
+                next_row_btn: Any = gr.Button(value="Next row", elem_id="next-row-btn")
                 add_question_row_btn: Any = gr.Button(value="Add row", variant="primary", elem_id="add-row-btn")
                 delete_question_row_btn: Any = gr.Button(value="Delete row", variant="stop")
 
             with gr.Row():
                 save_questions_btn: Any = gr.Button(value="Save Question list", variant="primary")
+
+    with gr.Accordion("Overview of Current Question list", open=True, visible=False) as question_overview_accordion:
+        questions_table = gr.Dataframe(
+            headers=TABLE_COLUMNS,
+            column_widths=REVIEW_COLUMN_WIDTHS,
+            datatype="markdown",
+            value=[],
+            row_count=1,
+            label="Overview of Review Questions (output)",
+            elem_id="questions-table",
+            wrap=True,
+            interactive=False,
+            static_columns=[0],
+        )
 
     go_btn: Any = gr.Button(value="Query selected files with current question list", variant="primary", elem_id="go-btn", visible=False)
     status_messages = gr.Textbox(label="Status", interactive=False, lines=8, visible=False)
@@ -2117,7 +2394,7 @@ with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
         fn=load_row_editor,
         inputs=[folder_path_input],
         outputs=[
-            row_selector,
+            selected_row_state,
             question_input,
             task_input,
             instruction_input,
@@ -2130,23 +2407,51 @@ with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
         outputs=[classes_input],
     )
 
-    row_selector_change_event = row_selector.change(
-        fn=populate_form_from_selected_row,
-        inputs=[questions_table, row_selector],
-        outputs=[
-            question_input,
-            task_input,
-            instruction_input,
-            classes_input,
-        ],
-    )
-    row_selector_change_event.then(
+    task_input.change(
         fn=_classes_input_update,
         inputs=[task_input, classes_input],
         outputs=[classes_input],
     )
 
     task_input.change(
+        fn=_instruction_input_update,
+        inputs=[task_input, instruction_input, selected_row_state],
+        outputs=[instruction_input],
+    )
+
+    previous_row_event = previous_row_btn.click(
+        fn=select_previous_row_from_form,
+        inputs=[questions_table, selected_row_state],
+        outputs=[
+            questions_table,
+            selected_row_state,
+            question_input,
+            task_input,
+            instruction_input,
+            classes_input,
+            status_messages,
+        ],
+    )
+    previous_row_event.then(
+        fn=_classes_input_update,
+        inputs=[task_input, classes_input],
+        outputs=[classes_input],
+    )
+
+    next_row_event = next_row_btn.click(
+        fn=select_next_row_from_form,
+        inputs=[questions_table, selected_row_state],
+        outputs=[
+            questions_table,
+            selected_row_state,
+            question_input,
+            task_input,
+            instruction_input,
+            classes_input,
+            status_messages,
+        ],
+    )
+    next_row_event.then(
         fn=_classes_input_update,
         inputs=[task_input, classes_input],
         outputs=[classes_input],
@@ -2163,7 +2468,7 @@ with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
         ],
         outputs=[
             questions_table,
-            row_selector,
+            selected_row_state,
             question_input,
             task_input,
             instruction_input,
@@ -2179,10 +2484,10 @@ with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
 
     delete_question_row_event = delete_question_row_btn.click(
         fn=delete_question_row_from_form,
-        inputs=[questions_table, row_selector],
+        inputs=[questions_table, selected_row_state],
         outputs=[
             questions_table,
-            row_selector,
+            selected_row_state,
             question_input,
             task_input,
             instruction_input,
@@ -2200,7 +2505,7 @@ with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
         fn=save_and_reload_questions_table,
         inputs=[
             questions_table,
-            row_selector,
+            selected_row_state,
             question_input,
             task_input,
             instruction_input,
@@ -2210,7 +2515,7 @@ with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
         outputs=[
             status_messages,
             questions_table,
-            row_selector,
+            selected_row_state,
             question_input,
             task_input,
             instruction_input,
@@ -2262,6 +2567,11 @@ with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
         inputs=[analyse_folder_path_input, analyse_output_folder_dropdown, analyse_result_type_radio],
         outputs=[analyse_output_table, analyse_status_messages],
     )
+    screen_mode_change_event.then(
+        fn=_sidebar_status_for_mode,
+        inputs=[screen_mode, folder_path_input, analyse_status_messages],
+        outputs=[analyse_status_messages],
+    )
 
     analyse_folder_submit_event = analyse_folder_path_input.submit(
         fn=load_review_output_folders,
@@ -2309,4 +2619,4 @@ with gr.Blocks(analytics_enabled=False, head=KEEPALIVE_HEAD) as demo:
 if __name__ == "__main__":
     demo.queue(default_concurrency_limit=1)
     enable_pwa = os.getenv("APP_ENABLE_PWA", "0").strip().lower() in {"1", "true", "yes", "on"}
-    demo.launch(inbrowser=True, pwa=enable_pwa, css=TABLE_CSS)
+    demo.launch(inbrowser=True, pwa=enable_pwa, css=TABLE_CSS, head=KEEPALIVE_HEAD)

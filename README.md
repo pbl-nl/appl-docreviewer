@@ -198,7 +198,7 @@ This launches the Gradio app in your browser.
 
 For each run, output is written to:
 
-`<document_folder>/review/<YYYY_MM_DD_HHhour_MMmin_SSsec>/`
+`<document_folder>/review/<YYYYMMDD_HHhMMmSSs>/`
 
 Artifacts include:
 
