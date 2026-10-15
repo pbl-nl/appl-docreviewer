@@ -29,6 +29,34 @@ DEFAULT_SYNTHESIS_TEMPLATE = (
     "Document answers:\n{answer_string}"
 )
 
+DEFAULT_ANSWER_TEMPLATE = (
+    "Answer the question\n\n"
+    "{question}\n\n"
+    "with the restriction that the answer can only be extracted from the following context:\n"
+    "{context}."
+)
+
+DEFAULT_CLASSIFY_TEMPLATE = (
+    "You are an AI assistant for a document analysis system.\n"
+    "Analyze the retrieved context and return a response based on the question below.\n\n"
+    "Question: {question}\n\n"
+    "Retrieved context: {context}\n\n"
+    "Optional:\n"
+    "List any definitions here when necessary\n\n"
+    "Your task:\n"
+    "Assign the context to one or more of the following classes:\n"
+    "class 1: explain when the answer to the question must be assigned to class 1\n"
+    "class 2: explain when the answer to the question must be assigned to class 2,\n"
+    "etc.\n\n"
+    "When output in a specific format is required, use the text below\n"
+    "Return output in the following format:\n\n"
+    "document: class(es) | explanation\n\n"
+    "The explanation is the explanation, based on the context, of why these class(es) have been chosen and why the other class(es) have not been chosen.\n"
+    "If you don't know the answer because the context doesn't contain the information, then the class would be 1\n\n"
+    "Examples:\n"
+    "Here any real world examples can be given. This part can also be left out."
+)
+
 
 @lru_cache(maxsize=1)
 def _get_utils_module() -> Any:
@@ -384,6 +412,8 @@ def _normalize_task(value: Any) -> str:
         return normalized
     if normalized in {"classification", "class"}:
         return "classify"
+    if normalized in {"synthesize", "summarize", "summary"}:
+        return "synthesis"
     return "answer"
 
 
@@ -806,6 +836,66 @@ def _classes_input_update(task: str, classes: Any = None) -> Any:
     return gr.update(visible=False, value="")
 
 
+def _default_instruction_for_task(task: str) -> str:
+    """
+    Return a default instruction template for a task.
+
+    Parameters
+    ----------
+    task : str
+        selected task value.
+
+    Returns
+    -------
+    str
+        default instruction text for the task, or empty string when none applies.
+    """
+    normalized_task = _normalize_task(task)
+    if normalized_task == "answer":
+        return DEFAULT_ANSWER_TEMPLATE
+    if normalized_task == "classify":
+        return DEFAULT_CLASSIFY_TEMPLATE
+    if normalized_task == "synthesis":
+        return DEFAULT_SYNTHESIS_TEMPLATE
+    return ""
+
+
+def _instruction_input_update(task: str, instruction: str, selected_row: Optional[str] = None) -> Any:
+    """
+    Auto-fill instruction textbox with a task default when currently empty.
+
+    Parameters
+    ----------
+    task : str
+        selected task value.
+    instruction : str
+        current instruction textbox value.
+    selected_row : Optional[str]
+        currently selected row number; when present, the editor is updating an existing row.
+
+    Returns
+    -------
+    Any
+        Gradio update object for the instruction textbox value.
+    """
+    current_instruction = str(instruction or "")
+
+    # When editing an existing row, a task change should switch to that task's default template.
+    if selected_row is not None:
+        default_instruction = _default_instruction_for_task(task)
+        if default_instruction:
+            return gr.update(value=default_instruction)
+        return gr.update(value=current_instruction)
+
+    if current_instruction.strip():
+        return gr.update(value=current_instruction)
+
+    default_instruction = _default_instruction_for_task(task)
+    if default_instruction:
+        return gr.update(value=default_instruction)
+    return gr.update(value=current_instruction)
+
+
 def _screen_mode_update(mode: str, ingest_folder_path: str) -> Tuple[Any, Any, Any, Any, Any, Any, Any]:
     """
     Toggle ingest and analysis UI sections based on selected screen mode.
@@ -824,7 +914,7 @@ def _screen_mode_update(mode: str, ingest_folder_path: str) -> Tuple[Any, Any, A
         analyse main group, question list overview accordion, GO button,
         and ingest status textbox.
     """
-    is_ingest_mode = (mode or "").strip().lower() == "ingest folder"
+    is_ingest_mode = (mode or "").strip().lower() == "query folder"
     ingest_visibility_update = gr.update(visible=is_ingest_mode)
     analyse_visibility_update = gr.update(visible=not is_ingest_mode)
 
@@ -876,11 +966,19 @@ def _ingest_main_visibility_update(folder_path: str) -> Tuple[Any, Any, Any, Any
             is_valid_folder = False
 
     visibility_update = gr.update(visible=is_valid_folder)
+    status_value = ""
+
+    if is_valid_folder:
+        questions_json_path = _questions_json_path(folder_path)
+        if not questions_json_path.is_file():
+            status_value = "Empty question list. Please provide one or more questions."
+
+    status_update = gr.update(visible=is_valid_folder, value=status_value)
     return (
         visibility_update,
         visibility_update,
         visibility_update,
-        visibility_update,
+        status_update,
     )
 
 
@@ -961,6 +1059,32 @@ def _analysis_result_type_update(selected_output_folder: Optional[str]) -> Any:
     if not selected_output_folder:
         return gr.update(visible=False, value=None)
     return gr.update(visible=True, value="answers")
+
+
+def _sidebar_status_for_mode(mode: str, folder_path: str, current_status: str) -> str:
+    """
+    Return sidebar status text based on selected mode and folder path.
+
+    Parameters
+    ----------
+    mode : str
+        selected mode value from the sidebar.
+    folder_path : str
+        current document folder path.
+    current_status : str
+        current status text shown in the sidebar.
+
+    Returns
+    -------
+    str
+        updated status message for the sidebar textbox.
+    """
+    normalized_mode = (mode or "").strip().lower()
+    if normalized_mode == "query folder" and not str(folder_path or "").strip():
+        return "Provide a document folder first."
+    if normalized_mode == "query folder":
+        return "Continue with the input form for review questions"
+    return str(current_status or "")
 
 
 def _json_payload_to_table(payload: Any) -> Tuple[List[str], List[List[Any]]]:
@@ -1114,7 +1238,11 @@ def add_question_row_from_form(
         updated table payload, selected row value, normalized form values, and status message.
     """
     rows = _normalize_questions_rows_with_options(table_data, drop_empty=False)
-    new_row = _normalize_review_row([question, task, instruction, classes])
+    resolved_instruction = str(instruction or "")
+    if not resolved_instruction.strip():
+        resolved_instruction = _default_instruction_for_task(task)
+
+    new_row = _normalize_review_row([question, task, resolved_instruction, classes])
     rows.append(new_row)
     selected_row = _selected_row_value(rows, len(rows) - 1)
 
@@ -2127,12 +2255,6 @@ with gr.Blocks(analytics_enabled=False) as demo:
 
     with gr.Sidebar():
         gr.Markdown("# ChatPBL DocReviewer")
-        screen_mode = gr.Radio(
-            label="Mode",
-            choices=["ingest folder", "analyse output"],
-            value="ingest folder",
-            interactive=True,
-        )
 
         with gr.Group() as ingest_sidebar_group:
             folder_path_input = gr.Textbox(label="Document folder", 
@@ -2167,12 +2289,19 @@ with gr.Blocks(analytics_enabled=False) as demo:
                 visible=False,
                 interactive=True,
             )
-            analyse_status_messages = gr.Textbox(label="Status", interactive=False, lines=3)
+
+        screen_mode = gr.Radio(
+            label="Mode",
+            choices=["query folder", "analyse output"],
+            value="query folder",
+            interactive=True,
+        )
+
+        analyse_status_messages = gr.Textbox(label="Status", interactive=False, lines=3)
 
     with gr.Accordion("Input form for review questions", open=False, visible=False) as main_screen_accordion:
         with gr.Group() as main_screen_group:
             with gr.Row():
-                question_input = gr.Textbox(label="question", lines=3, scale=8)
                 task_input = gr.Radio(
                     label="task",
                     choices=list(TASK_OPTIONS),
@@ -2180,6 +2309,7 @@ with gr.Blocks(analytics_enabled=False) as demo:
                     interactive=True,
                     scale=2,
                 )
+                question_input = gr.Textbox(label="question", lines=3, scale=8)
                 classes_input = gr.Textbox(
                     label="classes",
                     interactive=True,
@@ -2200,7 +2330,7 @@ with gr.Blocks(analytics_enabled=False) as demo:
             with gr.Row():
                 save_questions_btn: Any = gr.Button(value="Save Question list", variant="primary")
 
-    with gr.Accordion("Overview of Current Question list", open=False, visible=False) as question_overview_accordion:
+    with gr.Accordion("Overview of Current Question list", open=True, visible=False) as question_overview_accordion:
         questions_table = gr.Dataframe(
             headers=TABLE_COLUMNS,
             column_widths=REVIEW_COLUMN_WIDTHS,
@@ -2281,6 +2411,12 @@ with gr.Blocks(analytics_enabled=False) as demo:
         fn=_classes_input_update,
         inputs=[task_input, classes_input],
         outputs=[classes_input],
+    )
+
+    task_input.change(
+        fn=_instruction_input_update,
+        inputs=[task_input, instruction_input, selected_row_state],
+        outputs=[instruction_input],
     )
 
     previous_row_event = previous_row_btn.click(
@@ -2430,6 +2566,11 @@ with gr.Blocks(analytics_enabled=False) as demo:
         fn=load_selected_output_table,
         inputs=[analyse_folder_path_input, analyse_output_folder_dropdown, analyse_result_type_radio],
         outputs=[analyse_output_table, analyse_status_messages],
+    )
+    screen_mode_change_event.then(
+        fn=_sidebar_status_for_mode,
+        inputs=[screen_mode, folder_path_input, analyse_status_messages],
+        outputs=[analyse_status_messages],
     )
 
     analyse_folder_submit_event = analyse_folder_path_input.submit(
