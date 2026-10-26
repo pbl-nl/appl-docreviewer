@@ -265,7 +265,7 @@ class Ingester:
                     idx_metadata = collection['metadatas'][idx]
                     if idx_metadata['filename'] in to_delete:
                         idx_id_to_delete.append(idx_id)
-                        if idx_metadata['filename'].endswith(".docx"):
+                        if str(idx_metadata['filename']).lower().endswith(".docx"):
                             os.remove(os.path.join(self.content_folder,
                                                    "conversions",
                                                    idx_metadata['filename'] + ".pdf"))

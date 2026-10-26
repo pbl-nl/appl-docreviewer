@@ -10,6 +10,7 @@ Preparation for ingestion of text into vectorstore
 from typing import Dict, List, Tuple
 import os
 import re
+from pathlib import Path
 from loguru import logger
 from langchain_community.document_loaders import BSHTMLLoader, TextLoader
 import fitz
@@ -40,14 +41,18 @@ class FileParser:
         Tuple[List[Tuple[int, str]], Dict[str, str]]
             tuple of pages (list of tuples of pagenumbers and page texts) and metadata (dictionary)
         """
-        if file_path.endswith(".pdf"):
+        extension = Path(file_path).suffix.lower()
+
+        if extension == ".pdf":
             raw_pages, metadata = self.parse_pymupdf(file_path)
-        elif file_path.endswith(".txt") or file_path.endswith(".md"):
+        elif extension in {".txt", ".md"}:
             raw_pages, metadata = self.parse_txt(file_path)
-        elif file_path.endswith(".html"):
+        elif extension == ".html":
             raw_pages, metadata = self.parse_html(file_path)
-        elif file_path.endswith(".docx"):
+        elif extension == ".docx":
             raw_pages, metadata = self.parse_word(file_path)
+        else:
+            raise ValueError(f"Unsupported file extension for parsing: {file_path}")
 
         # return raw text from pages and metadata
         return raw_pages, metadata
