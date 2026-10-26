@@ -265,10 +265,13 @@ class Ingester:
                     idx_metadata = collection['metadatas'][idx]
                     if idx_metadata['filename'] in to_delete:
                         idx_id_to_delete.append(idx_id)
-                        if str(idx_metadata['filename']).lower().endswith(".docx"):
-                            os.remove(os.path.join(self.content_folder,
-                                                   "conversions",
-                                                   idx_metadata['filename'] + ".pdf"))
+if (str(idx_metadata['filename']).lower().endswith(".docx") and
+        os.path.exists(os.path.join(self.content_folder,
+                                    "conversions",
+                                    idx_metadata['filename'] + ".pdf"))):
+    os.remove(os.path.join(self.content_folder,
+                           "conversions",
+                           idx_metadata['filename'] + ".pdf"))
                 vector_store.delete(idx_id_to_delete)
                 logger.info("Deleted files from vectorstore")
 
