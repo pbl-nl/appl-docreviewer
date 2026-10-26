@@ -2219,16 +2219,21 @@ def handle_ingestion(folder_path: str, ingest_file_filter: List[str]) -> Iterato
                      selected_files=[path.name for path in paths])
 
         skipped_messages = []
+        skipped_files: List[str] = []
         ingested_count = 0
         skipped_count = 0
         requested_count = 0
         if isinstance(ingest_summary, dict):
             skipped_messages = ingest_summary.get("skipped_messages", []) or []
+            skipped_files = ingest_summary.get("skipped_files", []) or []
             ingested_count = int(ingest_summary.get("ingested_count", 0) or 0)
             skipped_count = int(ingest_summary.get("skipped_count", len(skipped_messages)) or 0)
             requested_count = int(ingest_summary.get("requested_count", 0) or 0)
         for skip_message in skipped_messages:
             yield _emit_status(skip_message, str(documents_root))
+
+        skipped_names = {str(name).strip().lower() for name in skipped_files if str(name).strip()}
+        review_paths = [path for path in paths if path.name.lower() not in skipped_names]
 
         yield _emit_status(
             (
@@ -2239,6 +2244,13 @@ def handle_ingestion(folder_path: str, ingest_file_filter: List[str]) -> Iterato
             ),
             str(documents_root),
         )
+
+        if not review_paths:
+            yield _emit_status(
+                "No queryable files remain after ingestion; all selected files were skipped.",
+                str(documents_root),
+            )
+            return
 
         yield _emit_status("Vector store ready.", str(documents_root))
 
@@ -2269,7 +2281,7 @@ def handle_ingestion(folder_path: str, ingest_file_filter: List[str]) -> Iterato
 
         for progress_message in create_answers_for_folder(
             question_list_path=destination_path,
-            review_files=paths,
+            review_files=review_paths,
             content_folder_name=content_folder_name,
             querier=querier,
             vecdb_folder_path=vecdb_folder_path,

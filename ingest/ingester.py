@@ -212,6 +212,7 @@ class Ingester:
         # create empty list representing added files
         files_added = []
         skipped_messages: List[str] = []
+        skipped_files: List[str] = []
         ingested_files: List[str] = []
 
         # get all relevant files in the folder
@@ -244,8 +245,18 @@ class Ingester:
                                 (filename_lastchange_dict[file] !=
                                  os.stat(os.path.join(self.content_folder, file)).st_mtime)]
 
-            # delete from vector store all chunks associated with deleted or updated files
-            to_delete = files_deleted + files_updated
+            updated_file_old_ids = {
+                file: [
+                    collection['ids'][idx]
+                    for idx in range(len(collection['ids']))
+                    if collection['metadatas'][idx]['filename'] == file
+                ]
+                for file in files_updated
+            }
+
+            # delete from vector store all chunks associated with deleted files only.
+            # Updated files are replaced safely later (add new chunks first, then remove old).
+            to_delete = files_deleted
             if len(to_delete) > 0:
                 logger.info(f"Files are deleted, so vector store for {self.content_folder} needs to be updated")
                 idx_id_to_delete = []
@@ -272,63 +283,97 @@ class Ingester:
                                                                 self.vecdb_folder)
             # all relevant files in the folder are to be ingested into the vector store
             to_add = list(relevant_files_in_folder_selected)
+            files_updated = []
+            updated_file_old_ids = {}
 
         # If there are any files to be ingested into the vector store
         if len(to_add) > 0:
             logger.info(f"Files are added, so vector store for {self.content_folder} needs to be updated")
             # create FileParser object
             file_parser = FileParser()
+            updated_files_set = set(files_updated)
 
             for file in to_add:
                 file_path = os.path.join(self.content_folder, file)
-                try:
-                    # extract raw text pages and metadata according to file type
-                    logger.info(f"Parsing file {file}")
-                    raw_texts, metadata = file_parser.parse_file(file_path)
+                # extract raw text pages and metadata according to file type
+                logger.info(f"Parsing file {file}")
+                raw_texts, metadata = file_parser.parse_file(file_path)
 
-                    has_extractable_text = any((text or "").strip() for _, text in raw_texts)
-                    if (file.lower().endswith(".pdf")) and (not has_extractable_text):
+                has_extractable_text = any((text or "").strip() for _, text in raw_texts)
+                if (file.lower().endswith(".pdf")) and (not has_extractable_text):
+                    if file in updated_files_set:
+                        message = (
+                            f"Skipped scanned/image-only PDF '{file}': no extractable text found; "
+                            "keeping previous indexed chunks."
+                        )
+                    else:
                         message = (
                             f"Skipped scanned/image-only PDF '{file}': no extractable text found."
                         )
-                        logger.warning(message)
-                        skipped_messages.append(message)
-                        continue
+                    logger.warning(message)
+                    skipped_messages.append(message)
+                    skipped_files.append(file)
+                    continue
 
-                    documents = self.clean_texts_to_docs(raw_texts=raw_texts,
-                                                         metadata=metadata)
-                    if not documents:
+                documents = self.clean_texts_to_docs(raw_texts=raw_texts,
+                                                     metadata=metadata)
+                if not documents:
+                    if file in updated_files_set:
+                        message = (
+                            f"Skipped file '{file}': no extractable text chunks were produced; "
+                            "keeping previous indexed chunks."
+                        )
+                    else:
                         message = (
                             f"Skipped file '{file}': no extractable text chunks were produced."
                         )
-                        logger.warning(message)
-                        skipped_messages.append(message)
-                        continue
+                    logger.warning(message)
+                    skipped_messages.append(message)
+                    skipped_files.append(file)
+                    continue
 
-                    # count tokens
-                    tokens_document = self.count_ada_tokens(raw_texts)
-                    logger.info(f"Extracted {len(documents)} chunks (Tokens: {tokens_document}) from {file}")
-                    if tokens_document > 40_000:
-                        logger.info("Pause for 10 seconds to avoid hitting rate limit")
-                        time.sleep(10)
+                # count tokens
+                tokens_document = self.count_ada_tokens(raw_texts)
+                logger.info(f"Extracted {len(documents)} chunks (Tokens: {tokens_document}) from {file}")
+                if tokens_document > 40_000:
+                    logger.info("Pause for 10 seconds to avoid hitting rate limit")
+                    time.sleep(10)
+
+                # For updated files, preserve old chunks unless replacement fully succeeds.
+                if file in updated_files_set:
                     vector_store.add_documents(
                         documents=documents,
                         embedding=embeddings,
                         collection_name=self.collection_name,
                         persist_directory=self.vecdb_folder,
                     )
-                    ingested_files.append(file)
-                except Exception as exc:
-                    message = f"Skipped file '{file}' due to ingestion error: {exc}"
-                    logger.exception(message)
-                    skipped_messages.append(message)
+                    old_ids = updated_file_old_ids.get(file, [])
+                    if old_ids:
+                        try:
+                            vector_store.delete(old_ids)
+                        except Exception as exc:
+                            raise RuntimeError(
+                                f"Failed to finalize synchronized update for '{file}': old chunks could not be removed"
+                            ) from exc
+                else:
+                    vector_store.add_documents(
+                        documents=documents,
+                        embedding=embeddings,
+                        collection_name=self.collection_name,
+                        persist_directory=self.vecdb_folder,
+                    )
+
+                ingested_files.append(file)
             logger.info("Added files to vectorstore")
+
+        skipped_files = list(dict.fromkeys(skipped_files))
 
         return {
             "skipped_messages": skipped_messages,
+            "skipped_files": skipped_files,
             "ingested_files": ingested_files,
             "requested_files": list(to_add),
             "ingested_count": len(ingested_files),
-            "skipped_count": len(skipped_messages),
+            "skipped_count": len(skipped_files),
             "requested_count": len(to_add),
         }
