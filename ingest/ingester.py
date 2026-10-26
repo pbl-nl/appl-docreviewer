@@ -7,7 +7,7 @@ When instantiating without parameters, attributes get values from settings.py
 # imports
 import os
 import re
-from typing import Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 import time
 from loguru import logger
 from langchain_core.documents import Document
@@ -195,10 +195,15 @@ class Ingester:
             total_tokens += len(tokens)
         return total_tokens
 
-    def ingest(self) -> None:
+    def ingest(self) -> Dict[str, Any]:
         """
         Ingests all relevant files in the folder
         Checks are done whether vector store needs to be synchronized with folder contents
+
+        Returns
+        -------
+        Dict[str, Any]
+            summary with ingestion details, including skipped files/messages.
         """
         # get embeddings
         embeddings = EmbeddingsCreator(self.embeddings_provider,
@@ -206,6 +211,8 @@ class Ingester:
 
         # create empty list representing added files
         files_added = []
+        skipped_messages: List[str] = []
+        ingested_files: List[str] = []
 
         # get all relevant files in the folder
         relevant_files_in_folder_selected = ut.get_relevant_files_in_folder(self.content_folder,
@@ -274,21 +281,54 @@ class Ingester:
 
             for file in to_add:
                 file_path = os.path.join(self.content_folder, file)
-                # extract raw text pages and metadata according to file type
-                logger.info(f"Parsing file {file}")
-                raw_texts, metadata = file_parser.parse_file(file_path)
-                documents = self.clean_texts_to_docs(raw_texts=raw_texts,
-                                                     metadata=metadata)
-                # count tokens
-                tokens_document = self.count_ada_tokens(raw_texts)
-                logger.info(f"Extracted {len(documents)} chunks (Tokens: {tokens_document}) from {file}")
-                if tokens_document > 40_000:
-                    logger.info("Pause for 10 seconds to avoid hitting rate limit")
-                    time.sleep(10)
-                vector_store.add_documents(
-                    documents=documents,
-                    embedding=embeddings,
-                    collection_name=self.collection_name,
-                    persist_directory=self.vecdb_folder,
-                )
+                try:
+                    # extract raw text pages and metadata according to file type
+                    logger.info(f"Parsing file {file}")
+                    raw_texts, metadata = file_parser.parse_file(file_path)
+
+                    has_extractable_text = any((text or "").strip() for _, text in raw_texts)
+                    if (file.lower().endswith(".pdf")) and (not has_extractable_text):
+                        message = (
+                            f"Skipped scanned/image-only PDF '{file}': no extractable text found."
+                        )
+                        logger.warning(message)
+                        skipped_messages.append(message)
+                        continue
+
+                    documents = self.clean_texts_to_docs(raw_texts=raw_texts,
+                                                         metadata=metadata)
+                    if not documents:
+                        message = (
+                            f"Skipped file '{file}': no extractable text chunks were produced."
+                        )
+                        logger.warning(message)
+                        skipped_messages.append(message)
+                        continue
+
+                    # count tokens
+                    tokens_document = self.count_ada_tokens(raw_texts)
+                    logger.info(f"Extracted {len(documents)} chunks (Tokens: {tokens_document}) from {file}")
+                    if tokens_document > 40_000:
+                        logger.info("Pause for 10 seconds to avoid hitting rate limit")
+                        time.sleep(10)
+                    vector_store.add_documents(
+                        documents=documents,
+                        embedding=embeddings,
+                        collection_name=self.collection_name,
+                        persist_directory=self.vecdb_folder,
+                    )
+                    ingested_files.append(file)
+                except Exception as exc:
+                    message = f"Skipped file '{file}' due to ingestion error: {exc}"
+                    logger.exception(message)
+                    skipped_messages.append(message)
             logger.info("Added files to vectorstore")
+
+        return {
+            "skipped_messages": skipped_messages,
+            "ingested_files": ingested_files,
+            "requested_files": list(to_add),
+            "ingested_count": len(ingested_files),
+            "skipped_count": len(skipped_messages),
+            "requested_count": len(to_add),
+        }
