@@ -148,13 +148,15 @@ def is_relevant_file(content_folder_path: str, document_selection: List[str] | N
         True if file is relevant, otherwise False
     """
     relevant = False
+    extension = os.path.splitext(my_file)[1].lower()
+
     if ((document_selection is None) or (document_selection == ["All"])):
         relevant = ((os.path.isfile(os.path.join(content_folder_path, my_file))) and
-                    (os.path.splitext(my_file)[1] in VALID_EXTENSIONS) and
+                    (extension in VALID_EXTENSIONS) and
                     (not my_file.startswith("~")))
     else:
         relevant = ((os.path.isfile(os.path.join(content_folder_path, my_file))) and
-                    (os.path.splitext(my_file)[1] in VALID_EXTENSIONS) and
+                    (extension in VALID_EXTENSIONS) and
                     (not my_file.startswith("~")) and
                     (my_file in document_selection))
 
