@@ -341,19 +341,57 @@ class Ingester:
 
                 # For updated files, preserve old chunks unless replacement fully succeeds.
                 if file in updated_files_set:
-                    vector_store.add_documents(
+                    added_ids_raw = vector_store.add_documents(
                         documents=documents,
                         embedding=embeddings,
                         collection_name=self.collection_name,
                         persist_directory=self.vecdb_folder,
                     )
+                    added_ids = [idx for idx in (added_ids_raw or []) if idx]
                     old_ids = updated_file_old_ids.get(file, [])
                     if old_ids:
                         try:
                             vector_store.delete(old_ids)
                         except Exception as exc:
+                            # Roll back just-added chunks so we don't leave two generations in the store.
+                            rollback_ids = list(added_ids)
+                            if not rollback_ids:
+                                try:
+                                    refreshed_collection = vector_store.get()
+                                    rollback_ids = [
+                                        refreshed_collection['ids'][idx]
+                                        for idx in range(len(refreshed_collection['ids']))
+                                        if (
+                                            refreshed_collection['metadatas'][idx].get('filename') == file
+                                            and refreshed_collection['metadatas'][idx].get('last_change_time')
+                                            == metadata.get('last_change_time')
+                                        )
+                                    ]
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to identify rollback IDs for file '%s' after finalization failure.",
+                                        file,
+                                    )
+
+                            rollback_failed = False
+                            if rollback_ids:
+                                try:
+                                    vector_store.delete(rollback_ids)
+                                except Exception:
+                                    rollback_failed = True
+                                    logger.exception(
+                                        "Rollback failed for file '%s'; duplicate generations may remain.",
+                                        file,
+                                    )
+
+                            extra = (
+                                " Rollback of newly added chunks also failed."
+                                if rollback_failed
+                                else " Newly added chunks were rolled back."
+                            )
                             raise RuntimeError(
-                                f"Failed to finalize synchronized update for '{file}': old chunks could not be removed"
+                                f"Failed to finalize synchronized update for '{file}': old chunks could not be removed."
+                                f"{extra}"
                             ) from exc
                 else:
                     vector_store.add_documents(
