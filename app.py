@@ -12,6 +12,7 @@ import gradio as gr
 # local imports
 import settings
 from query.querier import Querier
+from ingest.ingester import Ingester
 import logging
 
 
@@ -1740,19 +1741,20 @@ def ingest_or_load_documents(
         file names selected by the user for ingestion. When omitted, all supported
         files in the folder are ingested.
     """
-    # if documents in source folder path are not ingested yet
     if not os.path.exists(vecdb_folder_path):
-        from ingest.ingester import Ingester
-
-        # ingest documents
-        ingester = Ingester(collection_name=content_folder_name,
-                            content_folder=content_folder_path,
-                            vecdb_folder=vecdb_folder_path,
-                            document_selection=selected_files or ["All"])
-        ingester.ingest()
-        logger.info(f"Created vector store in folder {vecdb_folder_path}")
+        logger.info(f"Creating vector store for folder {content_folder_name}")
     else:
-        logger.info(f"Vector store already exists for folder {content_folder_name}")
+        logger.info(
+            f"Vector store already exists for folder {content_folder_name}; synchronizing selected files"
+        )
+
+    # Always run ingest: when the store exists this synchronizes added/updated/deleted files.
+    ingester = Ingester(collection_name=content_folder_name,
+                        content_folder=content_folder_path,
+                        vecdb_folder=vecdb_folder_path,
+                        document_selection=selected_files or ["All"])
+    ingester.ingest()
+    logger.info(f"Vector store ready in folder {vecdb_folder_path}")
 
 
 def write_settings(
