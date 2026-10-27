@@ -106,6 +106,7 @@ ANALYSIS_DEFAULT_HEADERS = ["col_1", "col_2", "col_3"]
 ROW_NUMBER_COLUMN = "id"
 TABLE_COLUMNS = [ROW_NUMBER_COLUMN, *REVIEW_COLUMNS]
 REVIEW_COLUMN_WIDTHS: List[str | int] = ["3%", "24%", "8%", "42%", "23%"]
+ANALYSIS_OUTPUT_COLUMN_WIDTHS: List[str | int] = ["5%", "2%", "12%", "17%", "4%", "7%", "23%", "30%"]
 
 TASK_OPTIONS = ("answer", "classify", "synthesis")
 CLASSES_VALUE_SEPARATOR = "\n"
@@ -1725,7 +1726,7 @@ def ingest_or_load_documents(
     content_folder_path: str,
     vecdb_folder_path: str,
     selected_files: Optional[List[str]] = None,
-) -> None:
+) -> dict[str, Any]:
     """
     Depending on whether the vector store already exists, files will be chunked and stored in vectorstore or not
 
@@ -1740,6 +1741,10 @@ def ingest_or_load_documents(
     selected_files : Optional[List[str]]
         file names selected by the user for ingestion. When omitted, all supported
         files in the folder are ingested.
+    Returns
+    -------
+    dict[str, Any]
+        ingestion summary including skipped-file messages.
     """
     if not os.path.exists(vecdb_folder_path):
         logger.info(f"Creating vector store for folder {content_folder_name}")
@@ -1753,8 +1758,9 @@ def ingest_or_load_documents(
                         content_folder=content_folder_path,
                         vecdb_folder=vecdb_folder_path,
                         document_selection=selected_files or ["All"])
-    ingester.ingest()
+    ingest_summary = ingester.ingest()
     logger.info(f"Vector store ready in folder {vecdb_folder_path}")
+    return ingest_summary
 
 
 def write_settings(
@@ -2208,10 +2214,45 @@ def handle_ingestion(folder_path: str, ingest_file_filter: List[str]) -> Iterato
 
         # ingest documents if documents in source folder path are not ingested yet
         yield _emit_status("Checking or building vector store (may take a while)...", str(documents_root))
-        ingest_or_load_documents(content_folder_name=content_folder_name,
+        ingest_summary = ingest_or_load_documents(content_folder_name=content_folder_name,
                      content_folder_path=folder_path,
                      vecdb_folder_path=vecdb_folder_path,
                      selected_files=[path.name for path in paths])
+
+        skipped_messages = []
+        skipped_files: List[str] = []
+        ingested_count = 0
+        skipped_count = 0
+        requested_count = 0
+        if isinstance(ingest_summary, dict):
+            skipped_messages = ingest_summary.get("skipped_messages", []) or []
+            skipped_files = ingest_summary.get("skipped_files", []) or []
+            ingested_count = int(ingest_summary.get("ingested_count", 0) or 0)
+            skipped_count = int(ingest_summary.get("skipped_count", len(skipped_messages)) or 0)
+            requested_count = int(ingest_summary.get("requested_count", 0) or 0)
+        for skip_message in skipped_messages:
+            yield _emit_status(skip_message, str(documents_root))
+
+        skipped_names = {str(name).strip().lower() for name in skipped_files if str(name).strip()}
+        review_paths = [path for path in paths if path.name.lower() not in skipped_names]
+
+        yield _emit_status(
+            (
+                "Ingestion summary: "
+                f"ingested {ingested_count} file(s), "
+                f"skipped {skipped_count} file(s), "
+                f"sync candidates {requested_count}."
+            ),
+            str(documents_root),
+        )
+
+        if not review_paths:
+            yield _emit_status(
+                "No queryable files remain after ingestion; all selected files were skipped.",
+                str(documents_root),
+            )
+            return
+
         yield _emit_status("Vector store ready.", str(documents_root))
 
         # write settings to file
@@ -2241,7 +2282,7 @@ def handle_ingestion(folder_path: str, ingest_file_filter: List[str]) -> Iterato
 
         for progress_message in create_answers_for_folder(
             question_list_path=destination_path,
-            review_files=paths,
+            review_files=review_paths,
             content_folder_name=content_folder_name,
             querier=querier,
             vecdb_folder_path=vecdb_folder_path,
@@ -2361,6 +2402,7 @@ with gr.Blocks(analytics_enabled=False) as demo:
         gr.Markdown("## Output Analysis")
         analyse_output_table = gr.Dataframe(
             headers=ANALYSIS_DEFAULT_HEADERS,
+            column_widths=ANALYSIS_OUTPUT_COLUMN_WIDTHS,
             datatype="markdown",
             value=[],
             label="Selected output",

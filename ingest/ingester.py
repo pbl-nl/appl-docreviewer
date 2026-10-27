@@ -7,7 +7,7 @@ When instantiating without parameters, attributes get values from settings.py
 # imports
 import os
 import re
-from typing import Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 import time
 from loguru import logger
 from langchain_core.documents import Document
@@ -195,10 +195,15 @@ class Ingester:
             total_tokens += len(tokens)
         return total_tokens
 
-    def ingest(self) -> None:
+    def ingest(self) -> Dict[str, Any]:
         """
         Ingests all relevant files in the folder
         Checks are done whether vector store needs to be synchronized with folder contents
+
+        Returns
+        -------
+        Dict[str, Any]
+            summary with ingestion details, including skipped files/messages.
         """
         # get embeddings
         embeddings = EmbeddingsCreator(self.embeddings_provider,
@@ -206,6 +211,9 @@ class Ingester:
 
         # create empty list representing added files
         files_added = []
+        skipped_messages: List[str] = []
+        skipped_files: List[str] = []
+        ingested_files: List[str] = []
 
         # get all relevant files in the folder
         relevant_files_in_folder_selected = ut.get_relevant_files_in_folder(self.content_folder,
@@ -225,7 +233,7 @@ class Ingester:
 
             # check if files were added, removed or updated
             # files_added depend on the selection that has been made
-            # files_updated depend on the selction that has been made
+            # files_updated depend on the selection that has been made
             # files_deleted depend on all files in the folder
             files_added = [file for file in relevant_files_in_folder_selected if file not in files_in_store]
             files_deleted = [file for file in files_in_store if file not in relevant_files_in_folder_all]
@@ -237,25 +245,39 @@ class Ingester:
                                 (filename_lastchange_dict[file] !=
                                  os.stat(os.path.join(self.content_folder, file)).st_mtime)]
 
-            # delete from vector store all chunks associated with deleted or updated files
-            to_delete = files_deleted + files_updated
-            if len(to_delete) > 0:
+            updated_file_old_ids = {
+                file: [
+                    collection['ids'][idx]
+                    for idx in range(len(collection['ids']))
+                    if collection['metadatas'][idx]['filename'] == file
+                ]
+                for file in files_updated
+            }
+
+            # delete from vector store all chunks associated with deleted files only.
+            # Updated files are replaced safely later (add new chunks first, then remove old).
+            if len(files_deleted) > 0:
                 logger.info(f"Files are deleted, so vector store for {self.content_folder} needs to be updated")
                 idx_id_to_delete = []
                 for idx in range(len(collection['ids'])):
                     idx_id = collection['ids'][idx]
                     idx_metadata = collection['metadatas'][idx]
-                    if idx_metadata['filename'] in to_delete:
+                    if idx_metadata['filename'] in files_deleted:
                         idx_id_to_delete.append(idx_id)
-                        if idx_metadata['filename'].endswith(".docx"):
+                        # when a Word document is deleted, also delete its converted PDF if it exists
+                        if (str(idx_metadata['filename']).lower().endswith(".docx") and
+                                os.path.exists(os.path.join(self.content_folder,
+                                                            "conversions",
+                                                            idx_metadata['filename'] + ".pdf"))):
                             os.remove(os.path.join(self.content_folder,
-                                                   "conversions",
-                                                   idx_metadata['filename'] + ".pdf"))
+                                                "conversions",
+                                                idx_metadata['filename'] + ".pdf"))
                 vector_store.delete(idx_id_to_delete)
                 logger.info("Deleted files from vectorstore")
 
             # add to vector store all chunks associated with added or updated files
             to_add = files_added + files_updated
+        
         # else it needs to be created first
         else:
             logger.info(f"Vector store to be created for folder {self.content_folder}")
@@ -265,30 +287,135 @@ class Ingester:
                                                                 self.vecdb_folder)
             # all relevant files in the folder are to be ingested into the vector store
             to_add = list(relevant_files_in_folder_selected)
+            files_updated = []
+            updated_file_old_ids = {}
 
         # If there are any files to be ingested into the vector store
         if len(to_add) > 0:
             logger.info(f"Files are added, so vector store for {self.content_folder} needs to be updated")
             # create FileParser object
             file_parser = FileParser()
+            updated_files_set = set(files_updated)
 
             for file in to_add:
                 file_path = os.path.join(self.content_folder, file)
                 # extract raw text pages and metadata according to file type
                 logger.info(f"Parsing file {file}")
                 raw_texts, metadata = file_parser.parse_file(file_path)
+
+                has_extractable_text = any((text or "").strip() for _, text in raw_texts)
+                if (file.lower().endswith(".pdf")) and (not has_extractable_text):
+                    if file in updated_files_set:
+                        message = (
+                            f"Skipped scanned/image-only PDF '{file}': no extractable text found; "
+                            "keeping previous indexed chunks."
+                        )
+                    else:
+                        message = (
+                            f"Skipped scanned/image-only PDF '{file}': no extractable text found."
+                        )
+                    logger.warning(message)
+                    skipped_messages.append(message)
+                    skipped_files.append(file)
+                    continue
+
                 documents = self.clean_texts_to_docs(raw_texts=raw_texts,
                                                      metadata=metadata)
+                if not documents:
+                    if file in updated_files_set:
+                        message = (
+                            f"Skipped file '{file}': no extractable text chunks were produced; "
+                            "keeping previous indexed chunks."
+                        )
+                    else:
+                        message = (
+                            f"Skipped file '{file}': no extractable text chunks were produced."
+                        )
+                    logger.warning(message)
+                    skipped_messages.append(message)
+                    skipped_files.append(file)
+                    continue
+
                 # count tokens
                 tokens_document = self.count_ada_tokens(raw_texts)
                 logger.info(f"Extracted {len(documents)} chunks (Tokens: {tokens_document}) from {file}")
                 if tokens_document > 40_000:
                     logger.info("Pause for 10 seconds to avoid hitting rate limit")
                     time.sleep(10)
-                vector_store.add_documents(
-                    documents=documents,
-                    embedding=embeddings,
-                    collection_name=self.collection_name,
-                    persist_directory=self.vecdb_folder,
-                )
+
+                # For updated files, preserve old chunks unless replacement fully succeeds.
+                if file in updated_files_set:
+                    added_ids_raw = vector_store.add_documents(
+                        documents=documents,
+                        embedding=embeddings,
+                        collection_name=self.collection_name,
+                        persist_directory=self.vecdb_folder,
+                    )
+                    added_ids = [idx for idx in (added_ids_raw or []) if idx]
+                    old_ids = updated_file_old_ids.get(file, [])
+                    if old_ids:
+                        try:
+                            vector_store.delete(old_ids)
+                        except Exception as exc:
+                            # Roll back just-added chunks so we don't leave two generations in the store.
+                            rollback_ids = list(added_ids)
+                            if not rollback_ids:
+                                try:
+                                    refreshed_collection = vector_store.get()
+                                    rollback_ids = [
+                                        refreshed_collection['ids'][idx]
+                                        for idx in range(len(refreshed_collection['ids']))
+                                        if (
+                                            refreshed_collection['metadatas'][idx].get('filename') == file
+                                            and refreshed_collection['metadatas'][idx].get('last_change_time')
+                                            == metadata.get('last_change_time')
+                                        )
+                                    ]
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to identify rollback IDs for file '%s' after finalization failure.",
+                                        file,
+                                    )
+
+                            rollback_failed = False
+                            if rollback_ids:
+                                try:
+                                    vector_store.delete(rollback_ids)
+                                except Exception:
+                                    rollback_failed = True
+                                    logger.exception(
+                                        "Rollback failed for file '%s'; duplicate generations may remain.",
+                                        file,
+                                    )
+
+                            extra = (
+                                " Rollback of newly added chunks also failed."
+                                if rollback_failed
+                                else " Newly added chunks were rolled back."
+                            )
+                            raise RuntimeError(
+                                f"Failed to finalize synchronized update for '{file}': old chunks could not be removed."
+                                f"{extra}"
+                            ) from exc
+                else:
+                    vector_store.add_documents(
+                        documents=documents,
+                        embedding=embeddings,
+                        collection_name=self.collection_name,
+                        persist_directory=self.vecdb_folder,
+                    )
+
+                ingested_files.append(file)
             logger.info("Added files to vectorstore")
+
+        skipped_files = list(dict.fromkeys(skipped_files))
+
+        return {
+            "skipped_messages": skipped_messages,
+            "skipped_files": skipped_files,
+            "ingested_files": ingested_files,
+            "requested_files": list(to_add),
+            "ingested_count": len(ingested_files),
+            "skipped_count": len(skipped_files),
+            "requested_count": len(to_add),
+        }
