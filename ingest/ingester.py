@@ -233,7 +233,7 @@ class Ingester:
 
             # check if files were added, removed or updated
             # files_added depend on the selection that has been made
-            # files_updated depend on the selction that has been made
+            # files_updated depend on the selection that has been made
             # files_deleted depend on all files in the folder
             files_added = [file for file in relevant_files_in_folder_selected if file not in files_in_store]
             files_deleted = [file for file in files_in_store if file not in relevant_files_in_folder_all]
@@ -256,27 +256,28 @@ class Ingester:
 
             # delete from vector store all chunks associated with deleted files only.
             # Updated files are replaced safely later (add new chunks first, then remove old).
-            to_delete = files_deleted
-            if len(to_delete) > 0:
+            if len(files_deleted) > 0:
                 logger.info(f"Files are deleted, so vector store for {self.content_folder} needs to be updated")
                 idx_id_to_delete = []
                 for idx in range(len(collection['ids'])):
                     idx_id = collection['ids'][idx]
                     idx_metadata = collection['metadatas'][idx]
-                    if idx_metadata['filename'] in to_delete:
+                    if idx_metadata['filename'] in files_deleted:
                         idx_id_to_delete.append(idx_id)
-if (str(idx_metadata['filename']).lower().endswith(".docx") and
-        os.path.exists(os.path.join(self.content_folder,
-                                    "conversions",
-                                    idx_metadata['filename'] + ".pdf"))):
-    os.remove(os.path.join(self.content_folder,
-                           "conversions",
-                           idx_metadata['filename'] + ".pdf"))
+                        # when a Word document is deleted, also delete its converted PDF if it exists
+                        if (str(idx_metadata['filename']).lower().endswith(".docx") and
+                                os.path.exists(os.path.join(self.content_folder,
+                                                            "conversions",
+                                                            idx_metadata['filename'] + ".pdf"))):
+                            os.remove(os.path.join(self.content_folder,
+                                                "conversions",
+                                                idx_metadata['filename'] + ".pdf"))
                 vector_store.delete(idx_id_to_delete)
                 logger.info("Deleted files from vectorstore")
 
             # add to vector store all chunks associated with added or updated files
             to_add = files_added + files_updated
+        
         # else it needs to be created first
         else:
             logger.info(f"Vector store to be created for folder {self.content_folder}")
