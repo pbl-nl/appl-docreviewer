@@ -106,6 +106,7 @@ ANALYSIS_DEFAULT_HEADERS = ["col_1", "col_2", "col_3"]
 ROW_NUMBER_COLUMN = "id"
 TABLE_COLUMNS = [ROW_NUMBER_COLUMN, *REVIEW_COLUMNS]
 REVIEW_COLUMN_WIDTHS: List[str | int] = ["3%", "24%", "8%", "42%", "23%"]
+ANALYSIS_OUTPUT_COLUMN_WIDTHS: List[str | int] = ["5%", "2%", "12%", "17%", "4%", "7%", "23%", "30%"]
 
 TASK_OPTIONS = ("answer", "classify", "synthesis")
 CLASSES_VALUE_SEPARATOR = "\n"
@@ -2401,6 +2402,7 @@ with gr.Blocks(analytics_enabled=False) as demo:
         gr.Markdown("## Output Analysis")
         analyse_output_table = gr.Dataframe(
             headers=ANALYSIS_DEFAULT_HEADERS,
+            column_widths=ANALYSIS_OUTPUT_COLUMN_WIDTHS,
             datatype="markdown",
             value=[],
             label="Selected output",
