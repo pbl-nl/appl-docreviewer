@@ -107,6 +107,7 @@ ROW_NUMBER_COLUMN = "id"
 TABLE_COLUMNS = [ROW_NUMBER_COLUMN, *REVIEW_COLUMNS]
 REVIEW_COLUMN_WIDTHS: List[str | int] = ["3%", "24%", "8%", "42%", "23%"]
 ANALYSIS_OUTPUT_COLUMN_WIDTHS: List[str | int] = ["5%", "2%", "12%", "17%", "4%", "7%", "23%", "30%"]
+SYNTHESIS_OUTPUT_COLUMN_WIDTHS: List[str | int] = ["5%", "30%", "65%"]
 
 TASK_OPTIONS = ("answer", "classify", "synthesis")
 CLASSES_VALUE_SEPARATOR = "\n"
@@ -1170,24 +1171,50 @@ def load_selected_output_table(
     Tuple[Any, str]
         table update payload and status message.
     """
+    normalized_result_type = (selected_result_type or "answers").strip().lower()
+    column_widths = (
+        SYNTHESIS_OUTPUT_COLUMN_WIDTHS
+        if normalized_result_type == "syntheses"
+        else ANALYSIS_OUTPUT_COLUMN_WIDTHS
+    )
+
     if not document_folder_path:
-        return gr.update(headers=ANALYSIS_DEFAULT_HEADERS, value=[], visible=False), "Provide a document folder first."
+        return gr.update(
+            headers=ANALYSIS_DEFAULT_HEADERS,
+            column_widths=column_widths,
+            value=[],
+            visible=False,
+        ), "Provide a document folder first."
 
     if not selected_output_folder:
-        return gr.update(headers=ANALYSIS_DEFAULT_HEADERS, value=[], visible=False), "Select an output folder to continue."
+        return gr.update(
+            headers=ANALYSIS_DEFAULT_HEADERS,
+            column_widths=column_widths,
+            value=[],
+            visible=False,
+        ), "Select an output folder to continue."
 
-    normalized_result_type = (selected_result_type or "answers").strip().lower()
     output_filename = "answers_summary.json" if normalized_result_type == "syntheses" else "answers.json"
 
     try:
         document_folder = Path(document_folder_path).expanduser().resolve()
     except OSError:
-        return gr.update(headers=ANALYSIS_DEFAULT_HEADERS, value=[], visible=False), "Invalid document folder path."
+        return gr.update(
+            headers=ANALYSIS_DEFAULT_HEADERS,
+            column_widths=column_widths,
+            value=[],
+            visible=False,
+        ), "Invalid document folder path."
 
     output_path = document_folder / "review" / selected_output_folder / output_filename
     if not output_path.is_file():
         return (
-            gr.update(headers=ANALYSIS_DEFAULT_HEADERS, value=[], visible=False),
+            gr.update(
+                headers=ANALYSIS_DEFAULT_HEADERS,
+                column_widths=column_widths,
+                value=[],
+                visible=False,
+            ),
             f"No {output_filename} found in review/{selected_output_folder}.",
         )
 
@@ -1196,17 +1223,32 @@ def load_selected_output_table(
             payload = json.load(handle)
     except Exception as exc:
         logger.warning("Failed to read output file %s: %s", output_path, exc)
-        return gr.update(headers=ANALYSIS_DEFAULT_HEADERS, value=[], visible=False), f"Failed to load {output_filename}: {exc}"
+        return gr.update(
+            headers=ANALYSIS_DEFAULT_HEADERS,
+            column_widths=column_widths,
+            value=[],
+            visible=False,
+        ), f"Failed to load {output_filename}: {exc}"
 
     headers, rows = _json_payload_to_table(payload)
     if not rows:
         return (
-            gr.update(headers=ANALYSIS_DEFAULT_HEADERS, value=[], visible=False),
+            gr.update(
+                headers=ANALYSIS_DEFAULT_HEADERS,
+                column_widths=column_widths,
+                value=[],
+                visible=False,
+            ),
             f"Loaded {output_filename}, but it contains no rows.",
         )
 
     return (
-        gr.update(headers=headers, value=rows, visible=True),
+        gr.update(
+            headers=headers,
+            column_widths=column_widths,
+            value=rows,
+            visible=True,
+        ),
         f"Loaded {output_filename} from review/{selected_output_folder}.",
     )
 
