@@ -1153,7 +1153,7 @@ def load_selected_output_table(
     document_folder_path: str,
     selected_output_folder: Optional[str],
     selected_result_type: Optional[str],
-) -> Tuple[Any, str]:
+) -> Tuple[Any, str, str]:
     """
     Load selected output JSON and prepare a table update for analyse mode.
 
@@ -1168,10 +1168,11 @@ def load_selected_output_table(
 
     Returns
     -------
-    Tuple[Any, str]
-        table update payload and status message.
+    Tuple[Any, str, str]
+        table update payload, status message, and markdown header value.
     """
     normalized_result_type = (selected_result_type or "answers").strip().lower()
+    output_header_text = "## Output Analysis of files: -"
     column_widths = (
         SYNTHESIS_OUTPUT_COLUMN_WIDTHS
         if normalized_result_type == "syntheses"
@@ -1184,7 +1185,7 @@ def load_selected_output_table(
             column_widths=column_widths,
             value=[],
             visible=False,
-        ), "Provide a document folder first."
+        ), "Provide a document folder first.", output_header_text
 
     if not selected_output_folder:
         return gr.update(
@@ -1192,7 +1193,7 @@ def load_selected_output_table(
             column_widths=column_widths,
             value=[],
             visible=False,
-        ), "Select an output folder to continue."
+        ), "Select an output folder to continue.", output_header_text
 
     output_filename = "answers_summary.json" if normalized_result_type == "syntheses" else "answers.json"
 
@@ -1204,7 +1205,7 @@ def load_selected_output_table(
             column_widths=column_widths,
             value=[],
             visible=False,
-        ), "Invalid document folder path."
+        ), "Invalid document folder path.", output_header_text
 
     output_path = document_folder / "review" / selected_output_folder / output_filename
     if not output_path.is_file():
@@ -1216,6 +1217,7 @@ def load_selected_output_table(
                 visible=False,
             ),
             f"No {output_filename} found in review/{selected_output_folder}.",
+            output_header_text,
         )
 
     try:
@@ -1228,7 +1230,61 @@ def load_selected_output_table(
             column_widths=column_widths,
             value=[],
             visible=False,
-        ), f"Failed to load {output_filename}: {exc}"
+        ), f"Failed to load {output_filename}: {exc}", output_header_text
+
+    output_file_names: set[str] = set()
+    if isinstance(payload, list):
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            filename_value = str(item.get("filename") or "").strip()
+            if filename_value:
+                output_file_names.add(filename_value)
+            filenames_value = item.get("filenames")
+            if isinstance(filenames_value, str):
+                output_file_names.update(
+                    value.strip() for value in filenames_value.splitlines() if value.strip()
+                )
+
+    if normalized_result_type == "syntheses":
+        if isinstance(payload, list):
+            cleaned_payload: List[Any] = []
+            for item in payload:
+                if not isinstance(item, dict):
+                    cleaned_payload.append(item)
+                    continue
+                cleaned_payload.append(
+                    {
+                        key: value
+                        for key, value in item.items()
+                        if str(key).strip().lower() != "filenames"
+                    }
+                )
+            payload = cleaned_payload
+
+        if not output_file_names:
+            answers_output_path = document_folder / "review" / selected_output_folder / "answers.json"
+            try:
+                with answers_output_path.open("r", encoding="utf-8") as answers_handle:
+                    answers_payload = json.load(answers_handle)
+                if isinstance(answers_payload, list):
+                    for item in answers_payload:
+                        if not isinstance(item, dict):
+                            continue
+                        candidate_name = str(item.get("filename") or "").strip()
+                        if candidate_name:
+                            output_file_names.add(candidate_name)
+            except Exception as exc:
+                logger.info(
+                    "Could not determine synthesis filenames from %s: %s",
+                    answers_output_path,
+                    exc,
+                )
+
+    ordered_output_file_names = sorted(output_file_names, key=lambda name: name.lower())
+    output_header_text = "## Output Analysis of files: " + (
+        ", ".join(ordered_output_file_names) if ordered_output_file_names else "-"
+    )
 
     headers, rows = _json_payload_to_table(payload)
     if not rows:
@@ -1240,6 +1296,7 @@ def load_selected_output_table(
                 visible=False,
             ),
             f"Loaded {output_filename}, but it contains no rows.",
+            output_header_text,
         )
 
     return (
@@ -1250,6 +1307,7 @@ def load_selected_output_table(
             visible=True,
         ),
         f"Loaded {output_filename} from review/{selected_output_folder}.",
+        output_header_text,
     )
 
 
@@ -2423,14 +2481,13 @@ with gr.Blocks(analytics_enabled=False) as demo:
             with gr.Row():
                 save_questions_btn: Any = gr.Button(value="Save Question list", variant="primary")
 
-    with gr.Accordion("Overview of Current Question list", open=True, visible=False) as question_overview_accordion:
+    with gr.Accordion("Overview of Review Questions", open=True, visible=False) as question_overview_accordion:
         questions_table = gr.Dataframe(
             headers=TABLE_COLUMNS,
             column_widths=REVIEW_COLUMN_WIDTHS,
             datatype="markdown",
             value=[],
             row_count=1,
-            label="Overview of Review Questions (output)",
             elem_id="questions-table",
             wrap=True,
             interactive=False,
@@ -2441,13 +2498,12 @@ with gr.Blocks(analytics_enabled=False) as demo:
     status_messages = gr.Textbox(label="Status", interactive=False, lines=8, visible=False)
 
     with gr.Group(visible=False) as analyse_main_group:
-        gr.Markdown("## Output Analysis")
+        analyse_output_header = gr.Markdown("## Output Analysis of files: -")
         analyse_output_table = gr.Dataframe(
             headers=ANALYSIS_DEFAULT_HEADERS,
             column_widths=ANALYSIS_OUTPUT_COLUMN_WIDTHS,
             datatype="markdown",
             value=[],
-            label="Selected output",
             elem_id="analysis-output-table",
             visible=False,
             interactive=False,
@@ -2659,7 +2715,7 @@ with gr.Blocks(analytics_enabled=False) as demo:
     screen_mode_change_event.then(
         fn=load_selected_output_table,
         inputs=[analyse_folder_path_input, analyse_output_folder_dropdown, analyse_result_type_radio],
-        outputs=[analyse_output_table, analyse_status_messages],
+        outputs=[analyse_output_table, analyse_status_messages, analyse_output_header],
     )
     screen_mode_change_event.then(
         fn=_sidebar_status_for_mode,
@@ -2688,7 +2744,7 @@ with gr.Blocks(analytics_enabled=False) as demo:
     analyse_folder_submit_event.then(
         fn=load_selected_output_table,
         inputs=[analyse_folder_path_input, analyse_output_folder_dropdown, analyse_result_type_radio],
-        outputs=[analyse_output_table, analyse_status_messages],
+        outputs=[analyse_output_table, analyse_status_messages, analyse_output_header],
     )
 
     analyse_output_folder_dropdown.change(
@@ -2700,13 +2756,13 @@ with gr.Blocks(analytics_enabled=False) as demo:
     analyse_output_folder_dropdown.change(
         fn=load_selected_output_table,
         inputs=[analyse_folder_path_input, analyse_output_folder_dropdown, analyse_result_type_radio],
-        outputs=[analyse_output_table, analyse_status_messages],
+        outputs=[analyse_output_table, analyse_status_messages, analyse_output_header],
     )
 
     analyse_result_type_radio.change(
         fn=load_selected_output_table,
         inputs=[analyse_folder_path_input, analyse_output_folder_dropdown, analyse_result_type_radio],
-        outputs=[analyse_output_table, analyse_status_messages],
+        outputs=[analyse_output_table, analyse_status_messages, analyse_output_header],
     )
 
 
