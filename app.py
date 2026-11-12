@@ -117,14 +117,81 @@ KEEPALIVE_HEAD = f"""
 <script>
 (() => {{
     const intervalMs = {KEEPALIVE_INTERVAL_MS};
+    let analysisObserverAttached = false;
+    let analysisResetTimer = null;
+    let lastAnalysisSignature = "";
+
     const keepAlive = () => {{
         fetch(window.location.pathname, {{ method: "HEAD", cache: "no-store" }}).catch(() => {{}});
     }};
 
+    const resetAnalysisOutputScroll = () => {{
+        const root = document.getElementById("analysis-output-table");
+        if (!root) {{
+            return;
+        }}
+        const scrollers = root.querySelectorAll(".table-wrap, .table-container, [role='grid']");
+        scrollers.forEach((element) => {{
+            element.scrollTop = 0;
+        }});
+    }};
+
+    const scheduleAnalysisOutputScrollReset = () => {{
+        if (analysisResetTimer !== null) {{
+            clearTimeout(analysisResetTimer);
+        }}
+        analysisResetTimer = setTimeout(() => {{
+            analysisResetTimer = null;
+            resetAnalysisOutputScroll();
+        }}, 0);
+    }};
+
+    const getAnalysisSignature = () => {{
+        const root = document.getElementById("analysis-output-table");
+        if (!root) {{
+            return "";
+        }}
+        const headerText = (document.getElementById("analyse-output-header")?.innerText || "").trim();
+        const columnText = Array.from(root.querySelectorAll("th button, th"))
+            .map((element) => (element.textContent || "").trim())
+            .filter((text) => text.length > 0)
+            .join("|");
+        return `${{headerText}}::${{columnText}}`;
+    }};
+
+    const resetAnalysisOutputScrollIfNeeded = () => {{
+        const signature = getAnalysisSignature();
+        if (!signature || signature === lastAnalysisSignature) {{
+            return;
+        }}
+        lastAnalysisSignature = signature;
+        scheduleAnalysisOutputScrollReset();
+    }};
+
+    const attachAnalysisOutputObserver = () => {{
+        if (analysisObserverAttached) {{
+            return;
+        }}
+        const root = document.getElementById("analysis-output-table");
+        if (!root) {{
+            requestAnimationFrame(attachAnalysisOutputObserver);
+            return;
+        }}
+
+        const observer = new MutationObserver(() => {{
+            resetAnalysisOutputScrollIfNeeded();
+        }});
+        observer.observe(root, {{ childList: true, subtree: true }});
+        analysisObserverAttached = true;
+        resetAnalysisOutputScrollIfNeeded();
+    }};
+
     setInterval(keepAlive, intervalMs);
+    attachAnalysisOutputObserver();
     document.addEventListener("visibilitychange", () => {{
         if (document.visibilityState === "visible") {{
             keepAlive();
+            resetAnalysisOutputScrollIfNeeded();
         }}
     }});
 }})();
@@ -2498,7 +2565,7 @@ with gr.Blocks(analytics_enabled=False) as demo:
     status_messages = gr.Textbox(label="Status", interactive=False, lines=8, visible=False)
 
     with gr.Group(visible=False) as analyse_main_group:
-        analyse_output_header = gr.Markdown("## Output Analysis of files: -")
+        analyse_output_header = gr.Markdown("## Output Analysis of files: -", elem_id="analyse-output-header")
         analyse_output_table = gr.Dataframe(
             headers=ANALYSIS_DEFAULT_HEADERS,
             column_widths=ANALYSIS_OUTPUT_COLUMN_WIDTHS,
