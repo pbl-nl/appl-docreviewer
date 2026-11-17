@@ -17,6 +17,7 @@ from langchain_openai import ChatOpenAI
 from flashrank import Ranker
 # local imports
 import settings
+import utils as ut
 from query.retrieve_parent_chunks import ParentDocumentRetriever
 
 
@@ -65,17 +66,12 @@ class RetrieverCreator():
         # For BM25 retriever, a search filter on filename cannot directly be used
         # So first create a temporary collection with chunks of just the one file in the searchfilter
         if search_filter is not None:
-            # dict_keys(['ids', 'embeddings', 'documents', 'metadatas'])
-            collection = self.vectorstore.get()
-            filtered_collection = {}
-            filtered_collection["documents"] = []
-            filtered_collection["metadatas"] = []
-            for i, chunk_metadata in enumerate(collection["metadatas"]):
-                if chunk_metadata["filename"] == search_filter['filename']:
-                    filtered_collection["metadatas"].append(chunk_metadata)
-                    filtered_collection["documents"].append(collection["documents"][i])
+            filtered_collection = ut.get_vectorstore_contents(self.vectorstore,
+                                                              include=["documents", "metadatas"],
+                                                              where={"filename": search_filter['filename']})
         else:
-            filtered_collection = self.vectorstore.get()
+            filtered_collection = ut.get_vectorstore_contents(self.vectorstore,
+                                                              include=["documents", "metadatas"])
         bm25_retriever = BM25Retriever.from_texts(texts=filtered_collection["documents"],
                                                   metadatas=filtered_collection["metadatas"])
         # maximum number of chunks to retrieve for BM25 retriever

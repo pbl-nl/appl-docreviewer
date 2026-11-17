@@ -227,7 +227,7 @@ class Ingester:
                                                                 self.vecdb_folder)
             logger.info(f"Vector store already exists for specified settings and folder {self.content_folder}")
             # determine the files that are added or deleted
-            collection = vector_store.get()  # dict_keys(['ids', 'embeddings', 'documents', 'metadatas'])
+            collection = ut.get_vectorstore_contents(vector_store)  # dict_keys(['ids', 'metadatas'])
             files_in_store = [metadata['filename'] for metadata in collection['metadatas']]
             files_in_store = list(set(files_in_store))
 
@@ -272,7 +272,7 @@ class Ingester:
                             os.remove(os.path.join(self.content_folder,
                                                 "conversions",
                                                 idx_metadata['filename'] + ".pdf"))
-                vector_store.delete(idx_id_to_delete)
+                ut.delete_from_vectorstore(vector_store, idx_id_to_delete)
                 logger.info("Deleted files from vectorstore")
 
             # add to vector store all chunks associated with added or updated files
@@ -355,13 +355,13 @@ class Ingester:
                     old_ids = updated_file_old_ids.get(file, [])
                     if old_ids:
                         try:
-                            vector_store.delete(old_ids)
+                            ut.delete_from_vectorstore(vector_store, old_ids)
                         except Exception as exc:
                             # Roll back just-added chunks so we don't leave two generations in the store.
                             rollback_ids = list(added_ids)
                             if not rollback_ids:
                                 try:
-                                    refreshed_collection = vector_store.get()
+                                    refreshed_collection = ut.get_vectorstore_contents(vector_store)
                                     rollback_ids = [
                                         refreshed_collection['ids'][idx]
                                         for idx in range(len(refreshed_collection['ids']))
@@ -380,7 +380,7 @@ class Ingester:
                             rollback_failed = False
                             if rollback_ids:
                                 try:
-                                    vector_store.delete(rollback_ids)
+                                    ut.delete_from_vectorstore(vector_store, rollback_ids)
                                 except Exception:
                                     rollback_failed = True
                                     logger.exception(
