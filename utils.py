@@ -39,6 +39,55 @@ LANGUAGE_MAP = {
     'tr': 'turkish'
 }  # languages supported by nltk
 
+# Keep Chroma requests small enough to stay below SQLite's maximum number of SQL variables
+CHROMA_BATCH_SIZE = 5000
+
+
+def get_vectorstore_contents(vector_store: Any,
+                             include: List[str] | None = None,
+                             where: Dict[str, Any] | None = None) -> Dict[str, List[Any]]:
+    """
+    Retrieves all chunks from a Chroma vector store in batches, to avoid the
+    "too many SQL variables" error that occurs when fetching large collections at once.
+
+    Parameters
+    ----------
+    vector_store : Chroma
+        the vector store to read from
+    include : List[str] | None
+        fields to include, e.g. ["metadatas"] or ["documents", "metadatas"]. Defaults to ["metadatas"]
+    where : Dict[str, Any] | None
+        optional Chroma metadata filter
+
+    Returns
+    -------
+    Dict[str, List[Any]]
+        dictionary with key 'ids' plus a key for each included field
+    """
+    include = ["metadatas"] if include is None else include
+    result: Dict[str, List[Any]] = {"ids": [], **{field: [] for field in include}}
+    offset = 0
+    while True:
+        batch = vector_store.get(where=where, include=include, limit=CHROMA_BATCH_SIZE, offset=offset)
+        batch_ids = batch.get("ids") or []
+        if not batch_ids:
+            break
+        result["ids"].extend(batch_ids)
+        for field in include:
+            result[field].extend(batch.get(field) or [])
+        if len(batch_ids) < CHROMA_BATCH_SIZE:
+            break
+        offset += len(batch_ids)
+    return result
+
+
+def delete_from_vectorstore(vector_store: Any, ids: List[str]) -> None:
+    """
+    Deletes the given ids from a Chroma vector store in batches.
+    """
+    for start in range(0, len(ids), CHROMA_BATCH_SIZE):
+        vector_store.delete(ids[start:start + CHROMA_BATCH_SIZE])
+
 
 def create_vectordb_folder(my_folder_path_selected: str) -> None:
     """

@@ -182,9 +182,8 @@ class Querier:
         Dict[str: str]
             chunks metadata like filename, pagenumber, etc
         """
-        # sources keys: ['ids', 'embeddings', 'metadatas', 'documents', 'uris', 'data']
-        sources = self.vector_store.get()
-        metadata = [metadata for metadata in sources['metadatas'] if metadata['filename'] == filename]
+        sources = ut.get_vectorstore_contents(self.vector_store, where={"filename": filename})
+        metadata = sources['metadatas']
 
         # return only the first chunk, as filename metadata is the same for all chunks
         return metadata[0]
